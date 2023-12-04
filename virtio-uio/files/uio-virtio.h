@@ -20,8 +20,8 @@
 struct virtio_region {
         uint32_t indx;
         uint32_t offs;
-        uint32_t addr;
-        uint32_t size;
+        uint64_t addr;
+        uint64_t size;
 };
 
 #define VHOST_VIRTIO_ADD_REGION _IOWR(VHOST_VIRTIO, 0x90, struct virtio_region)

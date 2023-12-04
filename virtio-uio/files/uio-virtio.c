@@ -77,9 +77,8 @@ static int virtioctrl_add_region(struct virtio_region* region, int memtype)
         struct uio_map *map; /* new memory mapping */
         int err = 0;
         struct uio_device* idev = virtio_p_data.uio_dev;
-        unsigned long offset = 0;
 
-        /* Walk through the memory regions rray and find the first free slot */
+        /* Walk through the memory regions array and find the first free slot */
         for (i = 0;
              (i < MAX_UIO_MAPS) && (virtio_p_data.mem[i].size != 0);
              i++) {
@@ -87,8 +86,7 @@ static int virtioctrl_add_region(struct virtio_region* region, int memtype)
                     (virtio_p_data.mem[i].map != NULL)) {
                         ktype = virtio_p_data.mem[i].map->kobj.ktype;
                 }
-                offset += virtio_p_data.mem[i].offs + virtio_p_data.mem[i].size;
-                pr_info("Region: %d: 0x%X, %d bytes\n",
+                pr_info("Region: %d: 0x%LX, %Ld bytes\n",
                         i, virtio_p_data.mem[i].addr, virtio_p_data.mem[i].size);
         }
         mem_avail_idx = i;
@@ -111,8 +109,8 @@ static int virtioctrl_add_region(struct virtio_region* region, int memtype)
         virtio_p_data.mem[mem_avail_idx].size = region->size;
         virtio_p_data.mem[mem_avail_idx].memtype = memtype;
         virtio_p_data.mem[mem_avail_idx].name = "virtio";
-        virtio_p_data.mem[mem_avail_idx].offs = offset;
-        region->offs = offset;
+        virtio_p_data.mem[mem_avail_idx].offs = 0;
+        region->offs = mem_avail_idx * PAGE_SIZE;
         region->indx = mem_avail_idx;
         kobject_init(&map->kobj, ktype);
         virtio_p_data.mem[mem_avail_idx].map = map;
@@ -187,7 +185,7 @@ long int virtioctrl_ioctl (struct file* dev,
                 mutex_lock(&virtio_p_data.uio_dev->info_lock);
                 regsize = virtio_p_data.mem[reg_index].size;
                 if (regsize > 0) {
-                        region.offs = virtio_p_data.mem[reg_index].offs;
+                        region.offs = reg_index * PAGE_SIZE;
                         region.addr = virtio_p_data.mem[reg_index].addr;
                         region.size = virtio_p_data.mem[reg_index].size;
                 }
@@ -283,7 +281,7 @@ static int __init virtio_uio_init(void)
 	pr_info("Registered UIO handler for IRQ=%d\n", irq);
         for (i = 0; i < virtio_p_device.num_resources; i++) {
                 pr_info("Resource found:\n");
-                pr_info("start: 0x%X, end: 0x%X, flags: 0x%lX\n",
+                pr_info("start: 0x%LX, end: 0x%LX, flags: 0x%lX\n",
                        virtio_p_device.resource[i].start,
                         virtio_p_device.resource[i].end,
                         virtio_p_device.resource[i].flags);
