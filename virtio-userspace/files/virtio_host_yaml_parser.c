@@ -13,6 +13,7 @@
 #include <errno.h>
 #include <string.h>
 #include "virtio_host_parser.h"
+#include "virtio_host_lib.h"
 
 /* defines */
 #define VIRTIO_HOST_YAML_DBG
@@ -43,11 +44,28 @@ while ((0))
 #define valtohex(pair) strtoul((pair)->value, NULL, 16)
 #define valtodec(pair) strtoul((pair)->value, NULL, 10)
 
-
-/* locals */
+/* locals declarations */
 struct keyValPair {
 	char key[NODE_KEY_LEN];
 	char value[NODE_VAL_LEN];
+};
+
+/* local functions */
+static int virtioHostYamlParser(char *pBuf, size_t bufLen,
+				VIRTIO_HOST_CFG_INFO *pHostCfgInfo);
+static void virtioHostYamlFreeDevCfgs(struct virtioHostDev *pVirtioHostDev);
+static void virtioHostYamlFreeDevMaps(struct virtioMap **ppMaps,
+				      uint32_t mapCnt);
+
+/*
+ * Parser descriptor
+ */
+
+VIRTIO_HOST_CFG_PARSER yamlParser = {
+	.name          = YAML_PARSER,
+	.parserFn      = virtioHostYamlParser,
+	.freeDevCfgsFn = virtioHostYamlFreeDevCfgs,
+        .freeDevMapsFn = virtioHostYamlFreeDevMaps,
 };
 
 /*
@@ -640,14 +658,15 @@ int yamlLoadConfig(yaml_document_t* document, struct guestConfig* guests)
 }
 
 /*
- * Parses YAML configuration file
+ * Loads and parses YAML configuration file
  * buf - string containing YAML configuration
  * buflen - length of the string
- * guses - guest configuration
+ * guests - guest configuration
  * Return: 0 on success and -1 on error
  */
 
-int parseYaml(char* buf, int buflen, struct guestConfig* guests)
+int virtioHostYamlLoader(char* buf, int buflen,
+			 struct guestConfig* guests)
 {
 	int result = 0;
 	yaml_parser_t parser;
@@ -671,4 +690,282 @@ int parseYaml(char* buf, int buflen, struct guestConfig* guests)
 	/* Cleanup */
 	yaml_parser_delete(&parser);
 	return result;
+}
+
+/*******************************************************************************
+ *
+ * virtioHostYamlParser - parse YAML format configuration data
+ *
+ * This routine parses the virtio host configuration data with YAML parser.
+ * It allocates and initializes the guest VM memory maps and configuration table
+ * for the VSM virtual channels. The map, map number, channels, and channel
+ * number are stored in to a given structure specified by <pHostCfgInfo>.
+ *
+ * RETURNS: 0 when the virtio host configuration is parsed successfully.
+ *          -1 when configuration data can't be resolved.
+ *          -ENAMETOOLONG when any of the following condition are satisfied:
+ *            - the name length of guest VM exceeds 255.
+ *            - the arguments length of virtio host device exceeds 1024.
+ *          -EINVAL when the host physical address of some guest VM can not
+ *                  be translated to CPU read address.
+ *          -ENOSPC when there is no memory can be allocated.
+ *
+ * ERRNO: N/A
+ */
+static int virtioHostYamlParser(char *pBuf, size_t bufLen,
+		VIRTIO_HOST_CFG_INFO *pHostCfgInfo)
+{
+	struct guestConfig guestConfig;
+	struct virtioMap **pMaps;
+	uint32_t mapNum;
+	struct virtioHostDev *pVirtioHostDev;
+	uint32_t devNum;
+	uint32_t i;
+	uint32_t j;
+	uint32_t k;
+	int ret = 0;
+	size_t len;
+
+	ret = virtioHostYamlLoader(pBuf, bufLen, &guestConfig);
+	if (ret != 0) {
+		DBG_MSG(VIRTIO_HOST_YAML_DBG_ERR,
+			"configuration can't be parsed by YAML "
+			"parser!\n");
+		return -1;
+	}
+
+	DBG_MSG(VIRTIO_HOST_YAML_DBG_INFO, "\n%s\n", pBuf);
+
+	len = guestConfig.guests_count * sizeof (struct virtioMap *);
+	pMaps = malloc(len);
+	if (!pMaps) {
+		DBG_MSG(VIRTIO_HOST_YAML_DBG_ERR,
+			"allocate memory for pMap failed!\n");
+		ret = -1;
+		goto exit;
+	}
+
+	/* get guest VM memory maps */
+
+	DBG_MSG(VIRTIO_HOST_YAML_DBG_INFO, "Get guest VM memory maps\n");
+
+	for (i = 0; i < guestConfig.guests_count; i++) {
+		DBG_MSG(VIRTIO_HOST_YAML_DBG_INFO,
+			"Allocating guest %d\n", i);
+		mapNum = guestConfig.guests[i].maps_count;
+
+		len = sizeof(struct virtioMap) +
+			mapNum * sizeof(struct virtio_map_entry);
+
+		pMaps[i] = (struct virtioMap *)malloc(len);
+		if (pMaps[i] == NULL)
+		{
+			DBG_MSG(VIRTIO_HOST_YAML_DBG_ERR,
+				"Melory allocation failed!\n");
+			ret = -1;
+			goto exit;
+		}
+
+		pMaps[i]->count = mapNum;
+
+		DBG_MSG(VIRTIO_HOST_YAML_DBG_INFO,
+			"Filling guest %d name\n", i);
+		pMaps[i]->name[NAME_MAX] = 0;
+		strncpy(pMaps[i]->name, guestConfig.guests[i].name, NAME_MAX);
+		if (pMaps[i]->name[NAME_MAX] != 0)
+		{
+			DBG_MSG(VIRTIO_HOST_YAML_DBG_ERR,
+				"guest name too long!\n");
+			errno = ENAMETOOLONG;
+			ret = -1;
+			goto exit;
+		}
+
+		DBG_MSG(VIRTIO_HOST_YAML_DBG_INFO,
+			"Filling guest %d memory maps\n", i);
+		for (j = 0; j < mapNum; j++)
+		{
+			DBG_MSG(VIRTIO_HOST_YAML_DBG_INFO,
+				"Filling guest %d maps %d\n", i, j);
+			pMaps[i]->entry[j].hpaddr =
+				guestConfig.guests[i].maps[j].hpa;
+			pMaps[i]->entry[j].gpaddr =
+				guestConfig.guests[i].maps[j].gpa;
+			pMaps[i]->entry[j].size   =
+				guestConfig.guests[i].maps[j].size;
+			pMaps[i]->entry[j].cpaddr = 0;
+
+			DBG_MSG(VIRTIO_HOST_YAML_DBG_INFO,
+				"%s: "				   \
+				"\n    guest VM [%d] ----"	   \
+				"\n    map table: 0x%lx "	   \
+				"\n     - entry[%d]:     "	    \
+				"\n         hpaddr: 0x%lx "	    \
+				"\n         gpaddr: 0x%lx "	    \
+				"\n         cpaddr: 0x%lx "		\
+				"\n         size  : 0x%lx \n",
+				__FUNCTION__, i, (unsigned long)pMaps[i], j,
+				pMaps[i]->entry[j].hpaddr,
+				pMaps[i]->entry[j].gpaddr,
+				pMaps[i]->entry[j].cpaddr,
+				pMaps[i]->entry[j].size);
+		}
+	}
+
+	/* count the total device number */
+
+	DBG_MSG(VIRTIO_HOST_YAML_DBG_INFO, "Count the total device number\n");
+	for (i = 0, devNum = 0; i < guestConfig.devices_count; i++)
+		devNum += guestConfig.devices[i].channel_count;
+
+	DBG_MSG (VIRTIO_HOST_YAML_DBG_INFO,
+		 "device count [%d] type count [%d] \n",
+		 devNum, guestConfig.devices_count);
+
+	/* allocate memory for channels */
+
+	DBG_MSG(VIRTIO_HOST_YAML_DBG_INFO, "allocate memory for channels\n");
+
+	pVirtioHostDev = malloc(devNum * sizeof(struct virtioHostDev));
+	if (!pVirtioHostDev) {
+		DBG_MSG(VIRTIO_HOST_YAML_DBG_ERR, "memory allocation "
+				"for virtioHostDev failed!\n");
+		ret = -1;
+		goto exit;
+	}
+
+	DBG_MSG(VIRTIO_HOST_YAML_DBG_INFO, "Filling channel information\n");
+	for (i = 0, k = 0; i < guestConfig.devices_count; i++) {
+		for (j = 0;
+		     j < guestConfig.devices[i].channel_count;
+		     j++, k++) {
+			uint32_t channelId;
+			uint32_t l;
+			bool foundMap = false;
+			const char* guestName =
+				guestConfig.devices[i].channel[j].guest;
+
+			channelId = guestConfig.devices[i].channel[j].channelId;
+
+			for (l = 0; l < guestConfig.guests_count; l++) {
+				if (strncmp(guestName, pMaps[l]->name,
+					    sizeof(pMaps[l]->name)) == 0) {
+					foundMap = true;
+					break;
+				}
+			}
+
+			if (!foundMap) {
+				DBG_MSG(VIRTIO_HOST_YAML_DBG_ERR,
+					"channel %d not match "
+					"any guest VM!\n", channelId);
+				errno = EINVAL;
+				ret = -1;
+				goto exit;
+			}
+
+			pVirtioHostDev[k].typeId = guestConfig.devices[i].type;
+			pVirtioHostDev[k].channelNum = 1;
+			pVirtioHostDev[k].channels->pMap = pMaps[l];
+			pVirtioHostDev[k].channels->channelId = channelId;
+
+			pVirtioHostDev[k].args[PATH_MAX] = 0;
+			strncpy(pVirtioHostDev[k].args,
+				guestConfig.devices[i].channel[j].args,
+				PATH_MAX);
+			if (pVirtioHostDev[k].args[PATH_MAX] != 0) {
+				DBG_MSG(VIRTIO_HOST_YAML_DBG_ERR,
+					"arguments too long!\n");
+
+				errno = ENAMETOOLONG;
+				ret = -1;
+				goto exit;
+			}
+		}
+	}
+
+	DBG_MSG(VIRTIO_HOST_YAML_DBG_INFO, "Parsing complete\n");
+	pHostCfgInfo->pMaps  = pMaps;
+	pHostCfgInfo->mapNum = mapNum;
+	pHostCfgInfo->devNum = devNum;
+	pHostCfgInfo->pVirtioHostDev = pVirtioHostDev;
+
+exit:
+	freeGuestConfig(&guestConfig);
+
+	if (ret != 0) {
+		if (pMaps) {
+			for (i = 0; i < mapNum; i++) {
+				if (pMaps[i])
+					free(pMaps[i]);
+			}
+			free(pMaps);
+		}
+
+		if (pHostCfgInfo->pVirtioHostDev)
+			free(pVirtioHostDev);
+	}
+
+	return ret;
+}
+
+/*******************************************************************************
+ *
+ * virtioHostYamlFreeDevCfgs - free virtio host device configuration
+ *
+ * This routine frees the resource of virtio host device configuration.
+ *
+ * RETURNS: N/A
+ *
+ * ERRNO: N/A
+ */
+static void virtioHostYamlFreeDevCfgs(struct virtioHostDev *pVirtioHostDev)
+{
+	if (pVirtioHostDev) {
+		free(pVirtioHostDev);
+	}
+}
+
+/*******************************************************************************
+ *
+ * virtioHostYamlFreeDevMaps - free all the guest VM memory map resource
+ *
+ * This routine frees the resource of all the guest VM memory map resource
+ *
+ * RETURNS: N/A
+ *
+ * ERRNO: N/A
+ */
+static void virtioHostYamlFreeDevMaps(struct virtioMap **ppMaps,
+				      uint32_t mapCnt)
+{
+	uint32_t i;
+
+	if (ppMaps == NULL || mapCnt == 0) {
+		return;
+	}
+	for (i = 0; i < mapCnt; i++) {
+		if (ppMaps[i])
+			free(ppMaps[i]);
+		}
+	free(ppMaps);
+
+	return;
+}
+
+/*******************************************************************************
+ *
+ * virtioHostYamlConnect - initialize virtio host YAML handler
+
+ *
+ * This routine initializes and register virtio host YAML handler.
+ *
+ * RETURNS: N/A.
+ *
+ * ERRNO: N/A
+ */
+
+void virtioHostYamlConnect(void)
+{
+        (void)virtioHostParserConnect(&yamlParser);
 }

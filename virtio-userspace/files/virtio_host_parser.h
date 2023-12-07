@@ -12,6 +12,8 @@
 #define __INCvirtioHostCfgParserh
 #include <yaml.h>
 
+#define YAML_PARSER "YAML-parser"
+
 #define VM_NAME_LEN      20
 #define YAML_VERSION_LEN 20
 #define DEV_ARG_LEN      80
@@ -62,7 +64,7 @@ struct guestConfig {
  * buflen - length of the string
  * Return: 0 on success and -1 on error
  */
-int parseYaml(char* buf, int buflen, struct guestConfig* guests);
+int virtioHostYamlLoader(char* buf, int buflen, struct guestConfig* guests);
 
 /*
  * Print out the guests configuration
@@ -74,5 +76,23 @@ void printGuestConfig(struct guestConfig* guests);
  */
 void freeGuestConfig(struct guestConfig* guests);
 
+/* typedefs */
+typedef struct virtioHostCfgInfo {
+        struct virtioMap **pMaps;
+        uint32_t mapNum;
+        struct virtioHostDev *pVirtioHostDev;
+        uint32_t devNum;
+} VIRTIO_HOST_CFG_INFO;
+
+typedef struct virtioHostCfgParser
+{
+        char *name;
+        int (* parserFn)(char *, size_t, VIRTIO_HOST_CFG_INFO *);
+        void (* freeDevCfgsFn)(struct virtioHostDev *);
+        void (* freeDevMapsFn)(struct virtioMap **, uint32_t);
+} VIRTIO_HOST_CFG_PARSER;
+
+/* APIs for virtio host CFG parser */
+extern int virtioHostParserConnect (VIRTIO_HOST_CFG_PARSER *);
 
 #endif /* __INCvirtioHostCfgParserh */

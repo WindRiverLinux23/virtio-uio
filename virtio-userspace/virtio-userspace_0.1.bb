@@ -16,11 +16,15 @@ PR = "r0"
 PV = "0.1"
 S  = "${WORKDIR}"
 
-DEPENDS = "virtio-uio"
+DEPENDS = "virtio-uio libyaml"
 
 SRC_URI = "file://Makefile \
            file://COPYING \
            file://uio_test.c \
+           file://virtio_host_lib.h \
+           file://virtio_host_lib.c \
+           file://virtio_host_parser.h \
+           file://virtio_host_yaml_parser.c \
           "
 do_install() {
   install -d ${D}${bindir}
