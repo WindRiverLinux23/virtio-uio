@@ -1,6 +1,11 @@
 # UIO driver test Makefile
 
-SRCS = uio_test.c virtio_host_yaml_parser.c virtio_host_lib.c
+SRCS = uio_test.c \
+       virtio_host_yaml_parser.c \
+       virtio_host_lib.c \
+       virtioVsmHost.c \
+       virtio_host_block.c
+
 BINARY = uio_test
 
 OBJS = $(SRCS:.c=.o)

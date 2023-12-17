@@ -31,6 +31,7 @@ logic, such as configuration handling or queue handling.
 #include <errno.h>
 #include <string.h>
 #include <stddef.h>
+#include <linux/virtio_mmio.h>
 #include "virtio_host_lib.h"
 #include "virtio_host_parser.h"
 
@@ -66,36 +67,6 @@ while ((false));
 #endif  /* VIRTIO_HOST_DBG */
 
 #define VIRTIO_MMIO_MAGIC_VALUE_LE          0x74726976 /* virt */
-#define VIRTIO_MMIO_MAGIC_OFF               0x0
-#define VIRTIO_MMIO_VER_OFF                 0x4
-#define VIRTIO_MMIO_DEVID_OFF               0x8
-#define VIRTIO_MMIO_VENID_OFF               0xc
-#define VIRTIO_MMIO_DEV_FEATURE_OFF         0x10
-#define VIRTIO_MMIO_DEV_FEATURE_SEL_OFF     0x14
-#define VIRTIO_MMIO_DRV_FEATURE_OFF         0x20
-#define VIRTIO_MMIO_DRV_FEATURE_SEL_OFF     0x24
-#define VIRTIO_MMIO_QUEUE_SEL_OFF           0x30
-#define VIRTIO_MMIO_QUEUE_MAX_NUM_OFF       0x34
-#define VIRTIO_MMIO_QUEUE_NUM_OFF           0x38
-#define VIRTIO_MMIO_QUEUE_READY             0x44
-#define VIRTIO_MMIO_QUEUE_ALIGN             0x3c
-#define VIRTIO_MMIO_QUEUE_NOTIFY_OFF        0x50
-#define VIRTIO_MMIO_INT_STATUS_OFF          0x60
-#define VIRTIO_MMIO_INT_ACK                 0x64
-#define VIRTIO_MMIO_STATUS_OFF              0x70
-#define VIRTIO_MMIO_QUEUE_DESC_LOW          0x80
-#define VIRTIO_MMIO_QUEUE_DESC_HIGH         0x84
-#define VIRTIO_MMIO_QUEUE_AVAIL_LOW         0x90
-#define VIRTIO_MMIO_QUEUE_AVAIL_HIGH        0x94
-#define VIRTIO_MMIO_QUEUE_USED_LOW          0xa0
-#define VIRTIO_MMIO_QUEUE_USED_HIGH         0xa4
-#define VIRTIO_MMIO_SHM_SEL_OFF             0xac
-#define VIRTIO_MMIO_SHM_LEN_LOW             0xb0
-#define VIRTIO_MMIO_SHM_LEN_HIGH            0xb4
-#define VIRTIO_MMIO_SHM_BASE_LOW            0xb8
-#define VIRTIO_MMIO_SHM_BASE_HIGH           0xbc
-#define VIRTIO_MMIO_CFG_GENERATION          0xfc
-#define VIRTIO_MMIO_DEVICE_CFG              0x100
 
 #define VIRTIO_MMIO_MODERN_REG_VER          0x2
 
@@ -728,58 +699,58 @@ int virtioHostVsmReqRead(struct virtioHost *vHost,
 		return -1;
 	}
 
-	if (address >= VIRTIO_MMIO_DEVICE_CFG) {
+	if (address >= VIRTIO_MMIO_CONFIG) {
 		ret = vHost->pHostOps->reqRead(vHost,
-				address - VIRTIO_MMIO_DEVICE_CFG,
+				address - VIRTIO_MMIO_CONFIG,
 				size, pValue);
 		goto done;
 	}
 
 	switch (address)
 	{
-		case VIRTIO_MMIO_MAGIC_OFF:
+		case VIRTIO_MMIO_MAGIC_VALUE:
 			*pValue = VIRTIO_MMIO_MAGIC_VALUE_LE;
 			break;
-		case VIRTIO_MMIO_VER_OFF:
+		case VIRTIO_MMIO_VERSION:
 			*pValue = VIRTIO_MMIO_MODERN_REG_VER;
 			break;
-		case VIRTIO_MMIO_DEVID_OFF:
+		case VIRTIO_MMIO_DEVICE_ID:
 			*pValue = vHost->deviceId;
 			break;
-		case VIRTIO_MMIO_VENID_OFF:
+		case VIRTIO_MMIO_VENDOR_ID:
 			*pValue = vHost->vendorId;
 			break;
-		case VIRTIO_MMIO_DEV_FEATURE_OFF:
+		case VIRTIO_MMIO_DEVICE_FEATURES:
 			*pValue = vHost->devFeature[vHost->devFeatureSel];
 			break;
-		case VIRTIO_MMIO_DEV_FEATURE_SEL_OFF:
+		case VIRTIO_MMIO_DEVICE_FEATURES_SEL:
 			*pValue = vHost->devFeatureSel;
 			break;
-		case VIRTIO_MMIO_DRV_FEATURE_OFF:
+		case VIRTIO_MMIO_DRIVER_FEATURES:
 			*pValue = vHost->drvFeature[vHost->drvFeatureSel];
 			break;
-		case VIRTIO_MMIO_DRV_FEATURE_SEL_OFF:
+		case VIRTIO_MMIO_DRIVER_FEATURES_SEL:
 			*pValue = vHost->drvFeatureSel;
 			break;
-		case VIRTIO_MMIO_QUEUE_SEL_OFF:
+		case VIRTIO_MMIO_QUEUE_SEL:
 			*pValue = vHost->queueSel;
 			break;
-		case VIRTIO_MMIO_QUEUE_MAX_NUM_OFF:
+		case VIRTIO_MMIO_QUEUE_NUM_MAX:
 			*pValue = vHost->queueMaxNum;
 			break;
-		case VIRTIO_MMIO_QUEUE_NUM_OFF:
+		case VIRTIO_MMIO_QUEUE_NUM:
 			*pValue = vHost->pHostQueueReg[vHost->queueSel].queueNum;
 			break;
 		case VIRTIO_MMIO_QUEUE_READY:
 			*pValue = vHost->pHostQueueReg[vHost->queueSel].queueReady;
 			break;
-		case VIRTIO_MMIO_INT_STATUS_OFF:
+		case VIRTIO_MMIO_INTERRUPT_STATUS:
 			*pValue = vHost->intStatus;
 			break;
-		case VIRTIO_MMIO_INT_ACK:
+		case VIRTIO_MMIO_INTERRUPT_ACK:
 			ret = ENOTSUP;
 			break;
-		case VIRTIO_MMIO_STATUS_OFF:
+		case VIRTIO_MMIO_STATUS:
 			*pValue = vHost->status;
 			break;
 		case VIRTIO_MMIO_QUEUE_DESC_LOW:
@@ -824,7 +795,7 @@ int virtioHostVsmReqRead(struct virtioHost *vHost,
 			else
 				*pValue = 0xffffffffUL;
 			break;
-		case VIRTIO_MMIO_CFG_GENERATION:
+		case VIRTIO_MMIO_CONFIG_GENERATION:
 			break;
 		default:
 			VIRTIO_HOST_DBG_MSG(VIRTIO_HOST_DBG_ERR,
@@ -878,56 +849,56 @@ int virtioHostVsmReqWrite(struct virtioHost *vHost,
 			    "address(0x%lx) size(0x%lx) value(0x%x)\n",
 			    address, size, value);
 
-	if (address >= VIRTIO_MMIO_DEVICE_CFG) {
+	if (address >= VIRTIO_MMIO_CONFIG) {
 		return vHost->pHostOps->reqWrite(vHost,
 						 address -
-						 VIRTIO_MMIO_DEVICE_CFG,
+						 VIRTIO_MMIO_CONFIG,
 						 size, value);
 	}
 
 	switch (address)
 	{
-		case VIRTIO_MMIO_MAGIC_OFF:
-		case VIRTIO_MMIO_VER_OFF:
-		case VIRTIO_MMIO_DEVID_OFF:
-		case VIRTIO_MMIO_VENID_OFF:
-		case VIRTIO_MMIO_QUEUE_MAX_NUM_OFF:
-		case VIRTIO_MMIO_INT_STATUS_OFF:
-		case VIRTIO_MMIO_DEV_FEATURE_OFF:
+		case VIRTIO_MMIO_MAGIC_VALUE:
+		case VIRTIO_MMIO_VERSION:
+		case VIRTIO_MMIO_DEVICE_ID:
+		case VIRTIO_MMIO_VENDOR_ID:
+		case VIRTIO_MMIO_QUEUE_NUM_MAX:
+		case VIRTIO_MMIO_INTERRUPT_STATUS:
+		case VIRTIO_MMIO_DEVICE_FEATURES:
 			ret = ENOTSUP;
 			break;
-		case VIRTIO_MMIO_DEV_FEATURE_SEL_OFF:
+		case VIRTIO_MMIO_DEVICE_FEATURES_SEL:
 			if (value < 2)
 				vHost->devFeatureSel = value;
 			else
 				ret = ENOTSUP;
 			break;
-		case VIRTIO_MMIO_DRV_FEATURE_OFF:
+		case VIRTIO_MMIO_DRIVER_FEATURES:
 			vHost->drvFeature[vHost->drvFeatureSel] = value;
 			break;
-		case VIRTIO_MMIO_DRV_FEATURE_SEL_OFF:
+		case VIRTIO_MMIO_DRIVER_FEATURES_SEL:
 			if (value < 2)
 				vHost->drvFeatureSel = value;
 			else
 				ret = ENOTSUP;
 			break;
-		case VIRTIO_MMIO_QUEUE_SEL_OFF:
+		case VIRTIO_MMIO_QUEUE_SEL:
 			if (value >= vHost->queueMax)
 				ret = ENOTSUP;
 			else
 				vHost->queueSel = value;
 			break;
-		case VIRTIO_MMIO_QUEUE_NUM_OFF:
+		case VIRTIO_MMIO_QUEUE_NUM:
 			vHost->pHostQueueReg[vHost->queueSel].queueNum = value;
 			break;
 		case VIRTIO_MMIO_QUEUE_READY:
 			vHost->pHostQueueReg[vHost->queueSel].queueReady = value;
 			(void)virtioHostQueueEnable(vHost, vHost->queueSel);
 			break;
-		case VIRTIO_MMIO_INT_ACK:
+		case VIRTIO_MMIO_INTERRUPT_ACK:
 			vHost->intStatus &= ~value;
 			break;
-		case VIRTIO_MMIO_STATUS_OFF:
+		case VIRTIO_MMIO_STATUS:
 			value &= 0xff;
 			if (value == VIRTIO_STATUS_RESET) {
 				ret = virtioHostVsmReqReset(vHost);
@@ -968,7 +939,7 @@ int virtioHostVsmReqWrite(struct virtioHost *vHost,
 		case VIRTIO_MMIO_QUEUE_USED_HIGH:
 			vHost->pHostQueueReg[vHost->queueSel].used[1] = value;
 			break;
-		case VIRTIO_MMIO_SHM_SEL_OFF:
+		case VIRTIO_MMIO_SHM_SEL:
 			vHost->shmSel = value;
 			break;
 		default:
@@ -1182,7 +1153,7 @@ int virtioHostCreate
 	pthread_mutex_unlock(&vHostDeviceLock);
 
 	if (pgVirtioHostVsm->vsmOps.init(pVsmQueue, vHost) != 0) {
-		VIRTIO_HOST_DBG_MSG (VIRTIO_HOST_DBG_ERR, "virtioHostCreate "
+		VIRTIO_HOST_DBG_MSG (VIRTIO_HOST_DBG_ERR,
 				"failed to initialize channel\n");
 		ret = EACCES;
 		goto failed;
@@ -1240,7 +1211,7 @@ void virtioHostRelease(struct virtioHost *vHost)
 				}
 			}
 		}
-			/* mapped memory will be freed in virtioHostCfgFree() */
+		/* mapped memory will be freed in virtioHostCfgFree() */
 	}
 }
 
@@ -1934,7 +1905,7 @@ int virtioHostQueueGetBuf(struct virtioHostQueue *pQueue,
 				    &virtAddr)) {
 				VIRTIO_HOST_DBG_MSG(VIRTIO_HOST_DBG_ERR,
 						    "failed to translate "
-						    "address 0x%lx:0x%lx\n",
+						    "address 0x%llx:0x%lx\n",
 						    desc->addr,
 						    host_virtio64_to_cpu(
 							    pQueue->vHost,
@@ -1978,7 +1949,7 @@ int virtioHostQueueGetBuf(struct virtioHostQueue *pQueue,
 							&virtAddr)) {
 					VIRTIO_HOST_DBG_MSG(VIRTIO_HOST_DBG_ERR,
 							    "failed to translate "
-							    "address 0x%lx:"
+							    "address 0x%llx:"
 							    "0x%lx\n",
 							    inDesc->addr,
 							    host_virtio64_to_cpu(
@@ -2382,3 +2353,26 @@ void virtioHostDevTravel(vHostDevCallbackFn pFunc, void *pArg)
 	return;
 }
 
+/*
+ * Stop thread and return it's status
+ */
+int virtioHostStopThread(pthread_t thread)
+{
+	int res = pthread_cancel(thread);
+	void* pth_result;
+
+	if (res != 0) {
+		VIRTIO_HOST_DBG_MSG(VIRTIO_HOST_DBG_ERR,
+				    "Unable to cancel thread 0x%lx: %s\n",
+				    thread, strerror(errno));
+		return -1;
+	}
+	res = pthread_join(thread, &pth_result);
+	if (res != 0 || pth_result != PTHREAD_CANCELED) {
+		VIRTIO_HOST_DBG_MSG(VIRTIO_HOST_DBG_ERR,
+				    "Unable to get cancel thread 0x%lx: %s\n",
+				    thread, strerror(errno));
+		return -1;
+	}
+	return 0;
+}

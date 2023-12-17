@@ -19,6 +19,7 @@
 #include <limits.h>
 #include <sys/queue.h>
 #include <endian.h>
+#include <stdbool.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -74,7 +75,21 @@ extern "C" {
 
 #define dsb(opt) asm volatile("dsb " #opt : : : "memory")
 #define __mb()	dsb(sy)
-	
+
+#define max(a,b)				\
+({						\
+	__typeof__ (a) _a = (a);		\
+	__typeof__ (b) _b = (b);		\
+	_a > _b ? _a : _b;			\
+})
+
+#define min(a,b)				\
+({						\
+	__typeof__ (a) _a = (a);		\
+	__typeof__ (b) _b = (b);		\
+	_a < _b ? _a : _b;			\
+})
+
 typedef void* VIRT_ADDR;
 typedef unsigned long PHYS_ADDR;
 
@@ -82,11 +97,6 @@ struct virtioVsm;
 struct virtioHost;
 struct virioChannel;
 struct shmRegion;
-
-typedef enum {
-	false = 0,
-	true = 1
-} bool;
 
 typedef struct virtioVsm * VIRTIO_VSM_ID;
 typedef struct virtioVsmQueue * VIRTIO_VSM_QUEUE_ID;
@@ -282,6 +292,8 @@ extern void virtioHostDevTravel(vHostDevCallbackFn, void *);
 extern int virtioHostHpaConvertToCpa(PHYS_ADDR, PHYS_ADDR *);
 extern int virtioHostCfgFree(void);
 extern bool virtioHostQueueHasBuf(struct virtioHostQueue *pQueue);
+extern int virtioHostStopThread(pthread_t thread);
+
 static inline bool virtio_legacy_is_little_endian(void)
 {
   #ifdef __LITTLE_ENDIAN

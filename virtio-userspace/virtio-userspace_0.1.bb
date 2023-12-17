@@ -25,6 +25,8 @@ SRC_URI = "file://Makefile \
            file://virtio_host_lib.c \
            file://virtio_host_parser.h \
            file://virtio_host_yaml_parser.c \
+           file://virtioVsmHost.c \
+           file://virtio_host_block.c \
           "
 do_install() {
   install -d ${D}${bindir}
