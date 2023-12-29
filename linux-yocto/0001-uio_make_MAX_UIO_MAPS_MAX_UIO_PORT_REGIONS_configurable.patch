@@ -1,0 +1,63 @@
+From: Ramon Fried @ 2022-04-13  7:11 UTC (permalink / raw)
+  To: gregkh, linux-kernel; +Cc: Ramon Fried
+
+MAX_UIO_MAPS and MAX_UIO_PORT_REGIONS are hard-coded to 5.
+This is not always sufficiant for some drivers.
+Make the MAX_UIO_MAPS and MAX_UIO_PORT_REGIONS configurable by
+providing Kconfig int option with the defaut value of 5.
+
+Signed-off-by: Ramon Fried <rfried.dev@gmail.com>
+---
+ drivers/uio/Kconfig        | 14 ++++++++++++++
+ include/linux/uio_driver.h |  4 ++--
+ 2 files changed, 16 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/uio/Kconfig b/drivers/uio/Kconfig
+index 2e16c5338e5b..bc1fe83cec13 100644
+--- a/drivers/uio/Kconfig
++++ b/drivers/uio/Kconfig
+@@ -13,6 +13,20 @@ menuconfig UIO
+ 
+ if UIO
+ 
++config UIO_MAX_MAPS
++	int "Maximum of memory nodes each uio device support(1-128)"
++	range 1 128
++	default 5
++	help
++	  Maximum memory mapping each uio device can support.
++
++config UIO_MAX_PORT_REGIONS
++	int "Maximum of port regions each uio device support(1-128)"
++	range 1 128
++	default 5
++	help
++	  Maximum port regions each uio device can support.
++
+ config UIO_CIF
+ 	tristate "generic Hilscher CIF Card driver"
+ 	depends on PCI
+diff --git a/include/linux/uio_driver.h b/include/linux/uio_driver.h
+index 47c5962b876b..f7dc47347c71 100644
+--- a/include/linux/uio_driver.h
++++ b/include/linux/uio_driver.h
+@@ -44,7 +44,7 @@ struct uio_mem {
+ 	struct uio_map		*map;
+ };
+ 
+-#define MAX_UIO_MAPS	5
++#define MAX_UIO_MAPS	CONFIG_UIO_MAX_MAPS
+ 
+ struct uio_portio;
+ 
+@@ -64,7 +64,7 @@ struct uio_port {
+ 	struct uio_portio	*portio;
+ };
+ 
+-#define MAX_UIO_PORT_REGIONS	5
++#define MAX_UIO_PORT_REGIONS	CONFIG_UIO_MAX_PORT_REGIONS
+ 
+ struct uio_device {
+ 	struct module           *owner;
+-- 
+2.30.2

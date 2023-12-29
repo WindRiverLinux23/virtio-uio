@@ -1,0 +1,2 @@
+patch 0001-uio_make_MAX_UIO_MAPS_MAX_UIO_PORT_REGIONS_configurable.patch
+kconf non-hardware uio.cfg
