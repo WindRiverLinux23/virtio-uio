@@ -24,7 +24,7 @@
 #define VIRTIO_HOST_YAML_DBG_INFO            0x00000002
 #define VIRTIO_HOST_YAML_DBG_ALL             0xffffffff
 
-static uint32_t virtioHostYamlDbgMask = VIRTIO_HOST_YAML_DBG_ERR;
+static uint32_t virtioHostYamlDbgMask = VIRTIO_HOST_YAML_DBG_ALL;
 
 #define DBG_MSG(mask, fmt, ...)						\
         do {								\

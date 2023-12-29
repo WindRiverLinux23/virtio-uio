@@ -20,6 +20,8 @@
 #include <sys/queue.h>
 #include <endian.h>
 #include <stdbool.h>
+#include <stdint.h>
+#include "uio-virtio.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -70,6 +72,26 @@ extern "C" {
 #define VIRTIO_TYPE_BT                      40  /* virtio bluetooth */
 #define VIRTIO_TYPE_GPIO                    41  /* virtio gpio */
 #define VIRTIO_TYPE_RDMA                    42  /* virtio RDMA device */
+
+#define VIRTIO_DEV_ANY_ID 0xffffffff
+
+#define VIRTIO_MMIO_MAGIC_VALUE_LE 0x74726976 /* virt */
+
+/* driver status code */
+
+#define VIRTIO_STATUS_RESET       0x00u
+#define VIRTIO_STATUS_ACK         0x01u
+#define VIRTIO_STATUS_DRIVER      0x02u
+#define VIRTIO_STATUS_FEATURES_OK 0x08u
+#define VIRTIO_STATUS_DRIVER_OK   0x04u
+#define VIRTIO_STATUS_NEEDS_RESET 0x40u
+#define VIRTIO_STATUS_FAILED      0x80u
+
+/* virtio features */
+#define VIRTIO_F_RING_INDIRECT_DESC    28
+#define VIRTIO_F_RING_EVENT_IDX        29
+
+#define VIRTIO_VSM_CFG_REGION 1
 
 #define __iomem volatile
 
@@ -249,8 +271,55 @@ struct virtioHostDrvInfo
 	TAILQ_ENTRY(virtioHostDrvInfo) node;
 };
 
+struct device {
+	uint32_t version;
+	void* base; /* device base address */
+};
+
+struct virtio_device_id {
+	uint32_t device;
+	uint32_t vendor;
+};
+
+/**
+ * struct virtio_device - representation of a device using virtio
+ * @index: unique position on the virtio bus
+ * @failed: saved value for VIRTIO_CONFIG_S_FAILED bit (for restore)
+ * @config_enabled: configuration change reporting enabled
+ * @config_change_pending: configuration change reported while disabled
+ * @config_lock: protects configuration change reporting
+ * @vqs_list_lock: protects @vqs.
+ * @dev: underlying device.
+ * @id: the device type identification (used to match it with a driver).
+ * @config: the configuration ops for this device.
+ * @vringh_config: configuration ops for host vrings.
+ * @vqs: the list of virtqueues for this device.
+ * @features: the features supported by both driver and device.
+ * @priv: private pointer for the driver's use.
+ */
+struct virtio_device {
+	TAILQ_HEAD(vqList, virtqueue) queueList;
+	int index;
+	bool failed;
+	bool config_enabled;
+	bool config_change_pending;
+	pthread_mutex_t config_lock;
+	pthread_mutex_t vqs_list_lock;
+	struct device dev;
+	struct virtio_device_id id;
+	uint64_t features;
+	struct virtqueue** queues;
+	VIRT_ADDR* ringAddr;
+	uint32_t nVqs;
+	const char* virtio_ctrl_device;
+	const char* uio_device;
+
+	void *priv;
+};
+
 /* APIs for VSM */
 extern void virtioHostDevicesInit(void);
+extern void virtioHostInit(void);
 extern int virtioHostVsmRegister(struct virtioHostVsm *);
 extern int virtioHostVsmReqRead(struct virtioHost *, uint64_t,
 				uint64_t, uint32_t *);
@@ -293,6 +362,9 @@ extern int virtioHostHpaConvertToCpa(PHYS_ADDR, PHYS_ADDR *);
 extern int virtioHostCfgFree(void);
 extern bool virtioHostQueueHasBuf(struct virtioHostQueue *pQueue);
 extern int virtioHostStopThread(pthread_t thread);
+extern void *zmalloc(size_t size);
+extern int virtvsm_init(struct virtio_device *vdev);
+extern void virtvsm_deinit(struct virtio_device *vdev);
 
 static inline bool virtio_legacy_is_little_endian(void)
 {

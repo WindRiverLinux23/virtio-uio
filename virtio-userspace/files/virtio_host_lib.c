@@ -50,7 +50,7 @@ logic, such as configuration handling or queue handling.
 #define VIRTIO_HOST_DBG_INFO            0x00000020
 #define VIRTIO_HOST_DBG_ALL             0xffffffff
 
-static uint32_t virtioHostDbgMask = VIRTIO_HOST_DBG_ERR;
+static uint32_t virtioHostDbgMask = VIRTIO_HOST_DBG_ALL;
 
 #define VIRTIO_HOST_DBG_MSG(mask, fmt, ...)				\
 	do {								\
@@ -65,8 +65,6 @@ while ((false));
 #undef VIRTIO_HOST_DBG_MSG
 #define VIRTIO_HOST_DBG_MSG(...)
 #endif  /* VIRTIO_HOST_DBG */
-
-#define VIRTIO_MMIO_MAGIC_VALUE_LE          0x74726976 /* virt */
 
 #define VIRTIO_MMIO_MODERN_REG_VER          0x2
 
@@ -137,7 +135,7 @@ void host_writeq(uint64_t v, uint64_t __iomem *addr)
 	*addr = v;
 }
 
-static void *zmalloc(size_t size)
+void *zmalloc(size_t size)
 {
 	void* ptr = malloc(size);
 	if (ptr != 0) {
@@ -364,7 +362,7 @@ int virtioHostHpaConvertToCpa(PHYS_ADDR hostPhysAddr, PHYS_ADDR *pCpuAddr)
 	}
 
 	if (!pgVirtioHostVsm) {
-		VIRTIO_HOST_DBG_MSG (VIRTIO_HOST_DBG_INFO,
+		VIRTIO_HOST_DBG_MSG (VIRTIO_HOST_DBG_ERR,
 				"virtio VSM is not initialized!\n");
 		errno = ENOTSUP;
 		return -1;
@@ -393,7 +391,7 @@ int virtioHostHpaConvertToCpa(PHYS_ADDR hostPhysAddr, PHYS_ADDR *pCpuAddr)
 		}
 	}
 
-	VIRTIO_HOST_DBG_MSG (VIRTIO_HOST_DBG_INFO,
+	VIRTIO_HOST_DBG_MSG (VIRTIO_HOST_DBG_ERR,
 			     "the address not in any guest map region!\n");
 
 	errno = ENOENT;
@@ -468,7 +466,7 @@ static void virtioHostDevicesCreate(struct virtioHostDev *pHostDev,
 		/* find merge context in global list */
 		TAILQ_FOREACH(pHostDrvInfo, &vHostCreateRtnList, node) {
 			VIRTIO_HOST_DBG_MSG(VIRTIO_HOST_DBG_INFO,
-					    "%lx, %d, %d, channelNum:%d\n",
+					    "0x%lx, %d, %d, channelNum:%d\n",
 					    (unsigned long)pHostDrvInfo,
 					    pHostDrvInfo->typeId,
 					    pHostDev[i].typeId,
@@ -496,6 +494,16 @@ static void virtioHostDevicesCreate(struct virtioHostDev *pHostDev,
 	}
 }
 
+/*
+ * Initialize static structures
+ */
+void virtioHostInit(void)
+{
+	VIRTIO_HOST_DBG_MSG(VIRTIO_HOST_DBG_INFO, "start\n");
+	TAILQ_INIT(&vHostCreateRtnList);
+	TAILQ_INIT(&vHostDeviceList);
+	VIRTIO_HOST_DBG_MSG(VIRTIO_HOST_DBG_INFO, "done\n");
+}
 
 /*******************************************************************************
 *
@@ -518,7 +526,9 @@ void virtioHostDevicesInit(void)
 	uint32_t devNum;
 	uint32_t mapNum;
 	size_t dataLen;
-	char  *shmBuf;
+	const char  *shmBuf;
+	char* yamlBuf;
+	int i;
 	int r = -1;
 
 	VIRTIO_HOST_DBG_MSG(VIRTIO_HOST_DBG_INFO, "start\n");
@@ -533,31 +543,46 @@ void virtioHostDevicesInit(void)
 
 	/* get VSM share memory region */
 
-	(void)virtioHostVsmShmRegionGet(pgVirtioHostVsm, &vShmRegion);
-
-	shmBuf = (char *)vShmRegion.vaddr;
-	dataLen = strnlen(shmBuf, (size_t)vShmRegion.region.len); //zhe
-
-	if (dataLen == 0) {
+	if (virtioHostVsmShmRegionGet(pgVirtioHostVsm, &vShmRegion) != 0) {
 		VIRTIO_HOST_DBG_MSG (VIRTIO_HOST_DBG_ERR,
-				     "share memory is empty!\n");
-
-		virtioHostVsmShmRegionRelease(pgVirtioHostVsm, &vShmRegion);
+				     "unable to get the shared memory %s\n",
+				     strerror(errno));
 		return;
 	}
 
-	VIRTIO_HOST_DBG_MSG (VIRTIO_HOST_DBG_CFG, "%s\n", shmBuf);
+	shmBuf = (const char *)vShmRegion.vaddr;
+	dataLen = strnlen(shmBuf, (size_t)vShmRegion.region.len); //zhe
+	if (dataLen == 0) {
+		VIRTIO_HOST_DBG_MSG (VIRTIO_HOST_DBG_ERR,
+				     "share memory is empty!\n");
+		virtioHostVsmShmRegionRelease(pgVirtioHostVsm, &vShmRegion);
+		return;
+	}
+	yamlBuf = malloc(dataLen + 1);
+	if (yamlBuf == NULL) {
+		VIRTIO_HOST_DBG_MSG (VIRTIO_HOST_DBG_ERR,
+				     "config buffer allocation error\n");
+		return;
+	}
+	for (i = 0; i < dataLen; i++) {
+		yamlBuf[i] = shmBuf[i];
+	}
+	yamlBuf[i] = 0;
+
+	VIRTIO_HOST_DBG_MSG(VIRTIO_HOST_DBG_CFG, "%s\n", yamlBuf);
 
 	virtioHostYamlConnect();
 
 	/* parse the virtio host devices configuration */
-	r = virtioHostCfgParse(shmBuf, dataLen, &virtioHostCfgInfo);
+	r = virtioHostCfgParse(yamlBuf, dataLen, &virtioHostCfgInfo);
 	if (r != 0) {
 		VIRTIO_HOST_DBG_MSG (VIRTIO_HOST_DBG_ERR,
 				     "virtio host configuraton can't "
 				     "be parsed!\n");
+		free(yamlBuf);
 		return;
 	}
+	free(yamlBuf);
 
 	pMaps    = virtioHostCfgInfo.pMaps;
 	mapNum   = virtioHostCfgInfo.mapNum;

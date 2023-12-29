@@ -10,6 +10,7 @@
 
 #ifndef __INCvirtioHostCfgParserh
 #define __INCvirtioHostCfgParserh
+#include <stdint.h>
 #include <yaml.h>
 
 #define YAML_PARSER "YAML-parser"

@@ -1,15 +1,15 @@
 # UIO driver test Makefile
 
-SRCS = uio_test.c \
+SRCS = virtioUioTest.c \
        virtio_host_yaml_parser.c \
        virtio_host_lib.c \
        virtioVsmHost.c \
-       virtio_host_block.c
+       virtioHostBlock.c
 
 BINARY = uio_test
 
 OBJS = $(SRCS:.c=.o)
-LIBS = -lyaml
+LIBS = -lyaml -lssl -lcrypto
 
 .c.o:
 	$(CC) $(CFLAGS) -c -o $@ $<

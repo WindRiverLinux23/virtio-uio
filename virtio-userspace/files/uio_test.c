@@ -231,6 +231,11 @@ int main (void)
 
 	struct virtioVsmShmRegion* vsmRegions;
 
+	struct virtio_device virtioDevice = {
+		.virtio_ctrl_device = virtio_ctrl_device,
+		.uio_device = uio_device
+	};
+
 	/*
          * Open sysfs and read memory size
          */
@@ -256,7 +261,7 @@ int main (void)
          * Open the device file and map memory
          */
 
-        uio_fd = open(uio_device, O_RDWR | O_SYNC);
+        uio_fd = open(virtioDevice.uio_device, O_RDWR | O_SYNC);
         if (uio_fd < 0) {
                 printf("Device open error %s\n", strerror(errno));
                 return -1;
@@ -272,12 +277,14 @@ int main (void)
          * Controlling VirtIO
          */
 
+	sleep(1);
         regs = (uint32_t*)addr;
 
         printreg32(VIRTIO_MMIO_MAGIC_VALUE);
         printreg32(VIRTIO_MMIO_VERSION);
         printreg32(VIRTIO_MMIO_DEVICE_ID);
         printreg32(VIRTIO_MMIO_VENDOR_ID);
+	sleep(1);
 
 	if (virtioGetShmRegion(regs, &region, 0) != 0) {
                 printf("Getting VirtIO memory region failed: %s\n",
@@ -289,8 +296,9 @@ int main (void)
          * Open VirtIO control device and add a memory region
          */
 
-        printf("Open %s and add VirtIO memory region\n", virtio_ctrl_device);
-        ctrl_fd = open(virtio_ctrl_device, O_RDWR | O_SYNC);
+        printf("Open %s and add VirtIO memory region\n",
+	       virtioDevice.virtio_ctrl_device);
+        ctrl_fd = open(virtioDevice.virtio_ctrl_device, O_RDWR | O_SYNC);
         if (ctrl_fd < 0) {
                 printf("Control device open error: %s\n", strerror(errno));
                 return -1;
@@ -367,7 +375,8 @@ int main (void)
 
 	sleep(1); /* pause to have a clean output */
 
-	if (virtioCreateGuestMap(virtio_ctrl_device, &guests) != 0) {
+	if (virtioCreateGuestMap(virtioDevice.virtio_ctrl_device,
+				 &guests) != 0) {
 		printf("Guest memory region creation error %s\n",
 		       strerror(errno));
 	}
@@ -379,11 +388,22 @@ int main (void)
 		return -1;
 	}
 	for (i = 0; i < guests.guests[0].maps_count; i++) {
-		if (virtioMapGuestMemory(virtio_ctrl_device, uio_fd,
-					 i, &vsmRegions[i]) != 0) {
+		if (virtioMapGuestMemory(virtioDevice.virtio_ctrl_device,
+					 uio_fd, i, &vsmRegions[i]) != 0) {
 			printf("VSM memory mapping error\n");
 			return -1;
 		}
+	}
+
+	/*
+	 * Initialize host VSM
+	 */
+
+	virtioDevice.dev.base = addr;
+	printf("Virtio device address is %p\n", &virtioDevice);
+
+	if (virtvsm_init(&virtioDevice) != 0) {
+		printf("VSM initialization FAILED\n");
 	}
 
 	printf("Waiting for %ld seconds for interrupt\n", tv.tv_sec);
@@ -417,6 +437,8 @@ int main (void)
                         }
                 }
         }
+
+	virtvsm_deinit(&virtioDevice);
 
 	freeGuestConfig(&guests);
 

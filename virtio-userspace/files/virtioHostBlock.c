@@ -15,25 +15,32 @@
    the back-end storage media support for the reading and writing functions
    of virtio-block device on the host VM.
  */
-
 #include <unistd.h>
+#include <stdlib.h>
 #include <stdio.h>
+#include <stddef.h>
 #include <pthread.h>
 #include <semaphore.h>
-#include <errno.h>
 #include <string.h>
 #include <stdbool.h>
-#include <stdlib.h>
-#include <stddef.h>
-#include <sys/queue.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <sys/types.h>
+#include <sys/param.h>
+#include <sys/ioctl.h>
+#include <sys/stat.h>
+#include <sys/uio.h>
+#include <openssl/md5.h>
+#if OPENSSL_VERSION_NUMBER >= 0x30000000L
+#include <openssl/evp.h>
+#endif
+#include <linux/fs.h>
 #include <linux/virtio_blk.h>
 #include "virtio_host_lib.h"
 
-#undef VIRTIO_BLK_PERF
-
+/* #define VIRTIO_BLK_PERF */
 #ifdef VIRTIO_BLK_PERF
-/* FIXME: add functions for the time measurements */
-#include <linux/timex.h>
+/* #include <time.h> */
 #endif
 
 #define VIRTIO_BLK_DEV_DBG_ON
@@ -46,7 +53,7 @@
 #define VIRTIO_BLK_DEV_DBG_INFO            0x00000200
 #define VIRTIO_BLK_DEV_DBG_ALL             0xffffffff
 
-static uint32_t virtioBlkDevDbgMask = VIRTIO_BLK_DEV_DBG_ERR;
+static uint32_t virtioBlkDevDbgMask = VIRTIO_BLK_DEV_DBG_ALL;
 
 #define VIRTIO_BLK_DEV_DBG(mask, fmt, ...)				\
 	do {								\
@@ -56,22 +63,22 @@ static uint32_t virtioBlkDevDbgMask = VIRTIO_BLK_DEV_DBG_ERR;
 			       ##__VA_ARGS__);				\
 		}							\
 	}								\
-while ((false));
+while ((false))
 #else
 #define VIRTIO_BLK_DEV_DBG(...)
-#endif  /* VIRTIO_BLK_DEV_DBG_ON */
+#endif  /* REG_MAP_DBG_ON */
 
 
 #define VIRTIO_BLK_DRV_NAME         "virtio-block-host"
 
-#define VIRTIO_BLK_QUEUE_MAX        1     /* block device only has one queue */
-#define VIRTIO_BLK_QUEUE_MAX_NUM    2048  /* max number of descriptors in a queue*/
-#define VIRTIO_BLK_DISK_ID_BYTES    20
+#define VIRTIO_BLK_QUEUE_MAX     1     /* block device only has one queue */
+#define VIRTIO_BLK_QUEUE_MAX_NUM 2048  /* max number of descriptors in a queue*/
+#define VIRTIO_BLK_DISK_ID_BYTES 20
 
-#define BLOCK_IO_REQ_MAX            256//256
-#define VIRTIO_BLK_SIZE             512
+#define BLOCK_IO_REQ_MAX         256
+#define VIRTIO_BLK_SIZE          512
 
-#define VIRTIO_BLK_HOST_DEV_MAX     30
+#define VIRTIO_BLK_HOST_DEV_MAX  30
 
 /* feature */
 #define HEX_CODE_CHECK(s, mode)                                                \
@@ -128,17 +135,16 @@ struct virtioBlkReqHdr {                 /* fixed-size block header */
 	uint32_t reserved;
 	uint64_t sector;
 #ifdef VIRTIO_BLK_PERF
-	uint64_t time1;
-	uint64_t time2;
-	uint64_t time3;
-	uint64_t time4;
-	uint64_t time5;
+	struct timespec time1;
+	struct timespec time2;
+	struct timespec time3;
+	struct timespec time4;
+	struct timespec time5;
 #endif
 	uint8_t status;
 } __attribute__((packed));
 
 struct virtioBlkIoReq {                  /* virtio block I/O request */
-	TAILQ_ENTRY(virtioBlkIoReq) node;
 	struct virtioBlkHostCtx *blkHostCtx;
 	struct virtioHostBuf bufList[BLOCK_IO_REQ_MAX];
 	int bufcnt;
@@ -157,31 +163,31 @@ struct virtioBlkHostDev {
 		struct virtioBlkConfig cfg;
 		uint64_t feature;
 		pthread_t work_thread;
-		bool work_thread_created;
 		sem_t work_sem;
-		pthread_mutex_t listLock;
-		TAILQ_HEAD(requestList, virtioBlkHostDev) pendReqList;
 	} blkHostCtx;
 
 	struct virtioBlkBeDevArgs {
 		char bePath[PATH_MAX + 1];     /* backend path     */
 		bool isFile;                   /* backend is file  */
 		bool ro;                       /* read-only        */
-		bool writeThru;                /*  1: write-though */
-		                               /*  0: copy-back    */
-		uint32_t  sectorSize;               /* sector size      */
-		uint32_t  phySectorSize;            /* PHYS sector size */
+		bool writeThru;                /* 1: write-though, 0: copy-back */
+		bool canDiscard;               /* discard          */
+		uint32_t sectorSize;           /* sector size      */
+		uint32_t phySectorSize;        /* PHYS sector size */
 		bool subFile;                  /* sub-file mode    */
-		uint64_t  subFileLba;               /* sub-file start   */
-		uint64_t  subFileSize;              /* sub-file size    */
+		uint64_t subFileLba;           /* sub-file start   */
+		uint64_t subFileSize;          /* sub-file size    */
+		uint32_t maxDiscardSectors;
+		uint32_t maxDiscardSeg;
+		uint32_t discardSectorAlignment;
 		struct virtioChannel channel[1];
 	} beDevArgs;
-
-	struct block_device *bdev;
 	int fd;
 	bool rdOnly;
 	uint64_t capacity;
 	uint32_t blkSize;
+	uint32_t logBlkSize;
+	uint32_t phyBlkSize;
 	char ident[VIRTIO_BLK_DISK_ID_BYTES + 1];
 };
 
@@ -198,7 +204,7 @@ static void virtioHostBlkFlush(struct virtioBlkIoReq *);
 static void virtioHostBlkGetId(struct virtioBlkIoReq *);
 static int virtioHostBlkCfgRead(struct virtioHost *, uint64_t, uint64_t size, uint32_t *);
 static int virtioHostBlkCfgWrite(struct virtioHost *, uint64_t, uint64_t, uint32_t);
-static void* virtioHostBlkReqHandle(void* arg);
+static void* virtioHostBlkReqHandle(void *pBlkHostCtx);
 static void virtioHostBlkDone(struct  virtioBlkIoReq *, struct virtioHostQueue *, int);
 static int virtioHostBlkCreate(struct virtioHostDev *);
 static void virtioHostBlkShow(struct virtioHost *, uint32_t);
@@ -217,11 +223,11 @@ static struct virtioHostDrvInfo virtioBlkHostDrvInfo =
 	.create = virtioHostBlkCreate,
 };
 
-/* Define the following line to use the disk in memory */
-#undef VIRTIO_BLK_MEM
-#ifdef VIRTIO_BLK_MEM
-#define VIRTIO_BLK_MEM_BLK_NUM 2*1024*64
-char *disk_mem = NULL;
+/* Uncomment the following line to use in-memory disk */
+/* #define VIRTIO_BLK_MEM_DISK */
+#ifdef VIRTIO_BLK_MEM_DISK
+#define VIRTIO_BLK_MEM_DISK_BLK_NUM 2*1024*64 /* 64MB */
+char *memDisk = NULL;
 #endif
 
 /*******************************************************************************
@@ -237,13 +243,16 @@ char *disk_mem = NULL;
 
 void virtioHostBlkDrvInit(uint32_t mountTimeout)
 {
+	VIRTIO_BLK_DEV_DBG(VIRTIO_BLK_DEV_DBG_INFO,
+			   "enter\n");
 	virtioHostDrvRegister((struct virtioHostDrvInfo *)&virtioBlkHostDrvInfo);
 
 	pthread_mutex_init(&vBlkHostDrv.drvLock, NULL);
 
 	vBlkHostDrv.mountTimeout = mountTimeout;
+	VIRTIO_BLK_DEV_DBG(VIRTIO_BLK_DEV_DBG_INFO,
+			   "done\n");
 }
-
 
 void virtioHostBlkDrvRelease(void)
 {
@@ -255,16 +264,15 @@ void virtioHostBlkDrvRelease(void)
 		pBlkHostDev = vBlkHostDrv.vBlkHostDevList[devNum];
 		pBlkHostCtx = (struct virtioBlkHostCtx *)pBlkHostDev;
 
+#if 0 //TODO
 		if (pBlkHostDev)
 			if (pBlkHostDev->bdev)
 				blkdev_put(pBlkHostDev->bdev, FMODE_READ | FMODE_WRITE);
+#endif
 
-		if (pBlkHostCtx && pBlkHostCtx->work_thread_created &&
-		    virtioHostStopThread(pBlkHostCtx->work_thread) != 0 ) {
-			VIRTIO_BLK_DEV_DBG(VIRTIO_BLK_DEV_DBG_ERR,
-					   "work thread cancel failed\n");
-			return;
-		}
+		if (pBlkHostCtx)
+			if (pBlkHostCtx->work_thread)
+				pthread_join(pBlkHostCtx->work_thread, NULL);
 
 		virtioHostRelease(&pBlkHostCtx->vhost);
 
@@ -283,51 +291,17 @@ void virtioHostBlkDrvRelease(void)
  * ERRNO: N/A
  */
 
-inline int virtioHostBlkFlushOp(struct virtioBlkHostDev *pBlkHostDev)
+int virtioHostBlkFlushOp(struct virtioBlkHostDev *pBlkHostDev)
 {
-/* FIXME: clarify the operation later ifdefed out for now */
-#if 0
-#ifndef VIRTIO_BLK_MEM
-	int ret;
-	struct bio *bio;
-#endif
-	if (pBlkHostDev->beDevArgs.isFile) {
+	int ret = 0;
+
+	if (fsync(pBlkHostDev->fd)) {
 		VIRTIO_BLK_DEV_DBG(VIRTIO_BLK_DEV_DBG_ERR,
-				"virtioHostBlkFlushOp file-backed not supported\n");
-		return -EFAULT;
-	}
-#ifndef VIRTIO_BLK_MEM
-#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 1, 0)
-	bio = bio_alloc(GFP_NOIO | __GFP_HIGH, 0);
-#else
-	bio = bio_alloc(pBlkHostDev->bdev, 0, REQ_OP_FLUSH | REQ_PREFLUSH, GFP_NOIO | __GFP_HIGH);
-#endif
-	if (!bio) {
-		VIRTIO_BLK_DEV_DBG(VIRTIO_BLK_DEV_DBG_ERR,
-				"virtioHostBlkFlushOp failed to allocate bio\n");
-		return -EFAULT;
+				"failed to fsync: %s\n", strerror(errno));
+		ret = errno;
 	}
 
-#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 1, 0)
-	bio_set_dev(bio, pBlkHostDev->bdev);
-	bio->bi_opf = REQ_OP_FLUSH | REQ_PREFLUSH;
-#endif
-
-	ret = submit_bio_wait(bio);
-	if (ret) {
-		VIRTIO_BLK_DEV_DBG(VIRTIO_BLK_DEV_DBG_ERR,
-				"virtioHostBlkFlushOp failed to submit bio(%d)\n",
-				ret);
-		return -EFAULT;
-	}
-
-	VIRTIO_BLK_DEV_DBG(VIRTIO_BLK_DEV_DBG_INFO,
-			"virtioHostBlkFlushOp bio:0x%llx opf:0x%x\n",
-			(uint64_t)bio, bio->bi_opf);
-	bio_put(bio);
-#endif
-#endif /* 0 */
-	return 0;
+	return ret;
 }
 
 /*******************************************************************************
@@ -344,159 +318,79 @@ inline int virtioHostBlkFlushOp(struct virtioBlkHostDev *pBlkHostDev)
  */
 static void virtioHostBlkSubmitBio(struct virtioBlkIoReq *pBlkReq)
 {
-#if 0
 	struct virtioBlkHostDev *pBlkHostDev;
 	struct virtioHost *vhost;
-	uint32_t blkSize;
-	uint64_t offset;
-	int ret = 0;
-	int i;
-
-#ifndef VIRTIO_BLK_MEM
-	struct bio *bio;
-	struct page *page;
-	unsigned long ram_buf;
-	int len;
+	struct iovec iov[BLOCK_IO_REQ_MAX];
+	int ret, len, i;
+#ifdef VIRTIO_BLK_MEM_DISK
+	uint64_t offset = 0;
 #endif
 
 	pBlkHostDev = (struct virtioBlkHostDev *)pBlkReq->blkHostCtx;
 	if (pBlkHostDev->beDevArgs.isFile) {
 		VIRTIO_BLK_DEV_DBG(VIRTIO_BLK_DEV_DBG_ERR,
-				"virtioHostBlkSubmitBio file-backed not supported\n");
+				"file-backed not supported\n");
 		return;
 	}
 
 	vhost = (struct virtioHost *)pBlkReq->blkHostCtx;
-	blkSize = pBlkHostDev->blkSize;
-	offset = pBlkReq->offset;
 
 #ifdef VIRTIO_BLK_PERF
-	pBlkReq->pReqHdr->time3 = ktime_get_real_fast_ns();
+	clock_gettime(CLOCK_MONOTONIC, &pReqHdr->time3);
 #endif
 
 	for (i = 0, pBlkReq->len = 0; i < pBlkReq->bufcnt; i++) {
-#ifdef VIRTIO_BLK_MEM
-		if (!disk_mem)
-			VIRTIO_BLK_DEV_DBG(VIRTIO_BLK_DEV_DBG_INFO,
-					"virtioHostBlkSubmitBio null disk_mem\n");
-
-		if (pBlkReq->opType == BLK_OP_READ) {
-			VIRTIO_BLK_DEV_DBG(VIRTIO_BLK_DEV_DBG_INFO,
-					"virtioHostBlkSubmitBio read 0x%x, 0x%lx -> 0x%lx (%u)\n",
-					pBlkReq->bufList[i].len,
-					(unsigned long)(disk_mem + offset * blkSize),
-					(unsigned long)pBlkReq->bufList[i].buf,
-					blkSize);
-
-			memcpy(pBlkReq->bufList[i].buf,
-					disk_mem + (offset * blkSize),
-					pBlkReq->bufList[i].len);
-		} else {
-			VIRTIO_BLK_DEV_DBG(VIRTIO_BLK_DEV_DBG_INFO,
-					"virtioHostBlkSubmitBio write 0x%x, 0x%lx -> 0x%lx (%u)\n",
-					pBlkReq->bufList[i].len,
-					(unsigned long)pBlkReq->bufList[i].buf,
-					(unsigned long)(disk_mem + offset * blkSize),
-					blkSize);
-
-			memcpy(disk_mem + (offset * blkSize),
-					pBlkReq->bufList[i].buf,
-					pBlkReq->bufList[i].len);
-		}
-
-		offset += (pBlkReq->bufList[i].len / blkSize);
+#ifdef VIRTIO_BLK_MEM_DISK
+		(void)memcpy(memDisk + (offset % (VIRTIO_BLK_MEM_DISK_BLK_NUM * pBlkHostDev->blkSize)),
+			pBlkReq->bufList[i].buf, pBlkReq->bufList[i].len);
+		offset += pBlkReq->bufList[i].len;
 #else
-		//native block driver
-		page = alloc_pages(GFP_KERNEL | __GFP_ZERO, get_order(pBlkReq->bufList[i].len));
-		if (!page) {
-			VIRTIO_BLK_DEV_DBG(VIRTIO_BLK_DEV_DBG_ERR,
-					"virtioHostBlkSubmitBio failed to alloc page\n");
-			return;
-		}
-
-#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 1, 0)
-		bio = bio_alloc(GFP_NOIO | __GFP_HIGH, 1);
-#else
-		bio = bio_alloc(pBlkHostDev->bdev, 1,
-				(pBlkReq->opType == BLK_OP_READ) ? REQ_OP_READ : REQ_OP_WRITE,
-				GFP_NOIO | __GFP_HIGH);
+		iov[i].iov_base = pBlkReq->bufList[i].buf;
+		iov[i].iov_len = pBlkReq->bufList[i].len;
 #endif
-		if (!bio) {
-			VIRTIO_BLK_DEV_DBG(VIRTIO_BLK_DEV_DBG_ERR,
-					"virtioHostBlkSubmitBio failed to alloc bio\n");
-			return;
-		}
-
-		bio->bi_iter.bi_sector = (sector_t)offset;
-#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 1, 0)
-		bio_set_dev(bio, pBlkHostDev->bdev);
-		bio->bi_opf = (pBlkReq->opType == BLK_OP_READ) ? REQ_OP_READ : REQ_OP_WRITE;
-#endif
-
-		ram_buf = (unsigned long)page_address(page);
-
-		// TODO
-		// This copy might be saved by a local ring buffer.
-		if (pBlkReq->opType == BLK_OP_WRITE)
-			memcpy((void *)ram_buf, pBlkReq->bufList[i].buf,
-					pBlkReq->bufList[i].len);
-
-		len = bio_add_page(bio, page, pBlkReq->bufList[i].len, 0);
-		if (len < pBlkReq->bufList[i].len) {
-			VIRTIO_BLK_DEV_DBG(VIRTIO_BLK_DEV_DBG_ERR,
-					"virtioHostBlkSubmitBio failed to add page 0x%x:0x%x\n",
-					pBlkReq->bufList[i].len, len);
-			bio_put(bio);
-			__free_pages(page, get_order(pBlkReq->bufList[i].len));
-			virtioHostBlkDone(pBlkReq, vhost->pQueue, ret);
-			return;
-		}
-
-		// TODO
-		// Should be able to submit multiple buffers together as much as
-		// possible so that native driver could do the potential
-		// optimization.
-		ret = submit_bio_wait(bio);
-		if (ret) {
-			VIRTIO_BLK_DEV_DBG(VIRTIO_BLK_DEV_DBG_ERR,
-					"virtioHostBlkSubmitBio failed to submit bio(%d)\n",
-					ret);
-			bio_put(bio);
-			virtioHostBlkDone(pBlkReq, vhost->pQueue, ret);
-			return;
-		}
-
-		if (pBlkReq->opType == BLK_OP_READ)
-			memcpy(pBlkReq->bufList[i].buf, (void *)ram_buf,
-					pBlkReq->bufList[i].len);
-
-		VIRTIO_BLK_DEV_DBG(VIRTIO_BLK_DEV_DBG_INFO,
-				"virtioHostBlkSubmitBio "
-				"page:0x%llx bio:0x%llx sector:0x%llx opf:0x%x\n",
-				(uint64_t)page, (uint64_t)bio, offset, bio->bi_opf);
-		bio_put(bio);
-
-		__free_pages(page, get_order(pBlkReq->bufList[i].len));
-
-		offset += (pBlkReq->bufList[i].len / blkSize);
-#endif
-		pBlkReq->len += pBlkReq->bufList[i].len;
 	}
 
-#ifdef VIRTIO_BLK_PERF
-	pBlkReq->pReqHdr->time4 = ktime_get_real_fast_ns();
+#ifndef VIRTIO_BLK_MEM_DISK
+	switch (pBlkReq->opType) {
+		case BLK_OP_READ:
+			len = preadv(pBlkHostDev->fd, iov, pBlkReq->bufcnt, pBlkReq->offset);
+			if (len < 0) {
+				VIRTIO_BLK_DEV_DBG(VIRTIO_BLK_DEV_DBG_ERR,
+					"failed to preadv: %s\n", strerror(errno));
+				ret = errno;
+			}
+			break;
+		case BLK_OP_WRITE:
+			len = pwritev(pBlkHostDev->fd, iov, pBlkReq->bufcnt, pBlkReq->offset);
+			if (len < 0) {
+				VIRTIO_BLK_DEV_DBG(VIRTIO_BLK_DEV_DBG_ERR,
+					"failed to pwritev: %s\n", strerror(errno));
+				ret = errno;
+			}
+			break;
+		case BLK_OP_FLUSH:
+			if (fsync(pBlkHostDev->fd)) {
+				VIRTIO_BLK_DEV_DBG(VIRTIO_BLK_DEV_DBG_ERR,
+					"failed to fsync: %s\n", strerror(errno));
+				ret = errno;
+			}
+		case BLK_OP_DISCARD:
+		default:
+			ret = -ENOTSUP;
+			break;
+	}
 #endif
 
-#endif /* 0 */
-	struct virtioHost* vhost = (struct virtioHost *)pBlkReq->blkHostCtx;
-	struct virtioBlkHostDev* pBlkHostDev =
-		(struct virtioBlkHostDev *)pBlkReq->blkHostCtx;
-	int ret = 0;
+#ifdef VIRTIO_BLK_PERF
+	clock_gettime(CLOCK_MONOTONIC, &pReqHdr->time4);
+#endif
 
+#ifndef VIRTIO_BLK_MEM_DISK
 	if ((vritioHostHasFeature(vhost, VIRTIO_BLK_F_FLUSH) == 0) &&
 			(pBlkReq->opType == BLK_OP_WRITE)) {
 		ret = virtioHostBlkFlushOp(pBlkHostDev);
 	}
+#endif
 
 	virtioHostBlkDone(pBlkReq, vhost->pQueue, ret);
 
@@ -525,9 +419,8 @@ static void virtioHostBlkFlush(struct virtioBlkIoReq *pBlkReq)
 
 	ret = virtioHostBlkFlushOp(vBlkHostDev);
 	if (ret)
-		VIRTIO_BLK_DEV_DBG (VIRTIO_BLK_DEV_DBG_ERR,
-				"%s failed to synchronize storage media\n",
-				__FUNCTION__);
+		VIRTIO_BLK_DEV_DBG(VIRTIO_BLK_DEV_DBG_ERR,
+				"failed to synchronize storage media\n");
 
 	virtioHostBlkDone(pBlkReq, vhost->pQueue, ret);
 
@@ -555,7 +448,7 @@ static void virtioHostBlkGetId(struct virtioBlkIoReq *pBlkReq)
 	vhost = (struct virtioHost *)pBlkReq->blkHostCtx;
 
 	size = sizeof(vBlkHostDev->ident);
-	pBlkReq->len = min(size, pBlkReq->bufList[0].len);
+	pBlkReq->len = MIN(size, pBlkReq->bufList[0].len);
 
 	VIRTIO_BLK_DEV_DBG(VIRTIO_BLK_DEV_DBG_INFO,
 			"virtioHostBlkGetId vBlkHostDev->ident: %d, %s\n",
@@ -583,42 +476,114 @@ static void virtioHostBlkGetId(struct virtioBlkIoReq *pBlkReq)
 static int virtioHostBlkCreateWithBlk(struct virtioBlkHostDev *pBlkHostDev)
 {
 	struct virtioBlkBeDevArgs *pBlkBeDevArgs = &pBlkHostDev->beDevArgs;
-#if 0
-#ifdef VIRTIO_BLK_MEM
-	pBlkHostDev->blkSize = VIRTIO_BLK_SIZE; //block size
-	pBlkHostDev->capacity = VIRTIO_BLK_MEM_BLK_NUM; //total number of blocks
+	struct stat sbuf;
+	long sz;
+	long long b;
+	off_t size, psectsz;
+	off_t probe_arg[] = {0, 0};
+	int ret = 0;
 
-	disk_mem = vzalloc(VIRTIO_BLK_MEM_BLK_NUM * pBlkHostDev->blkSize);
-	if (!disk_mem) {
+#ifdef VIRTIO_BLK_MEM_DISK
+	pBlkHostDev->blkSize = VIRTIO_BLK_SIZE; //block size
+	pBlkHostDev->logBlkSize = VIRTIO_BLK_SIZE; //block size
+	pBlkHostDev->phyBlkSize = VIRTIO_BLK_SIZE; //block size
+	pBlkHostDev->capacity = VIRTIO_BLK_MEM_DISK_BLK_NUM; //total number of blocks
+
+	memDisk = calloc(VIRTIO_BLK_MEM_DISK_BLK_NUM, pBlkHostDev->blkSize);
+	if (!memDisk) {
 		VIRTIO_BLK_DEV_DBG(VIRTIO_BLK_DEV_DBG_ERR,
-				"virtioHostBlkCreateWithBlk failed to alloc disk_mem\n");
-		return -EFAULT;
+				"failed to alloc memDisk\n");
+		return -ENOMEM;
 	}
 #else
-	pBlkHostDev->bdev = blkdev_get_by_path(pBlkBeDevArgs->bePath,
-			FMODE_READ | FMODE_WRITE, NULL);
-	if (IS_ERR(pBlkHostDev->bdev)) {
+	pBlkHostDev->fd = open(pBlkBeDevArgs->bePath, O_RDWR);
+	if (pBlkHostDev->fd < 0) {
 		VIRTIO_BLK_DEV_DBG(VIRTIO_BLK_DEV_DBG_ERR,
-				"virtioHostBlkCreateWithBlk failed to get blkdev %s(%ld)\n",
-				pBlkBeDevArgs->bePath, PTR_ERR(pBlkHostDev->bdev));
+				"failed to open %s(%d)\n",
+				pBlkBeDevArgs->bePath, pBlkHostDev->fd);
 		return -EFAULT;
-	} else {
+	}
+
+	ret = fstat(pBlkHostDev->fd, &sbuf);
+	if (ret < 0) {
+		VIRTIO_BLK_DEV_DBG(VIRTIO_BLK_DEV_DBG_ERR,
+				"failed to stat %s(%d)\n",
+				pBlkBeDevArgs->bePath, ret);
+	}
+
+	if (S_ISBLK(sbuf.st_mode)) {
+		/* get size */
+		ret = ioctl(pBlkHostDev->fd, BLKGETSIZE, &sz);
+		if (ret) {
+			VIRTIO_BLK_DEV_DBG(VIRTIO_BLK_DEV_DBG_ERR,
+					"failed to BLKGETSIZE(%d)\n", ret);
+			size = sbuf.st_size;	/* set default value */
+		} else {
+			size = sz * DEV_BSIZE;	/* DEV_BSIZE is 512 on Linux */
+		}
+		if (!ret || ret == EFBIG) {
+			ret = ioctl(pBlkHostDev->fd, BLKGETSIZE64, &b);
+			if (ret || b == 0 || b == sz)
+				size = b * DEV_BSIZE;
+			else
+				size = b;
+		}
 		VIRTIO_BLK_DEV_DBG(VIRTIO_BLK_DEV_DBG_INFO,
-				"virtioHostBlkCreateWithBlk got blkdev %s\n",
-				pBlkBeDevArgs->bePath);
+				"block partition size is 0x%lx\n", size);
+
+		/* get sector size, 512 on Linux */
+		VIRTIO_BLK_DEV_DBG(VIRTIO_BLK_DEV_DBG_INFO,
+				"block partition sector size is 0x%x\n", DEV_BSIZE);
+
+		/* get physical sector size */
+		ret = ioctl(pBlkHostDev->fd, BLKPBSZGET, &psectsz);
+		if (ret) {
+			VIRTIO_BLK_DEV_DBG(VIRTIO_BLK_DEV_DBG_ERR,
+					"failed to BLKPBSZGET(%d)\n", ret);
+			psectsz = DEV_BSIZE;  /* set default physical size */
+		}
+		VIRTIO_BLK_DEV_DBG(VIRTIO_BLK_DEV_DBG_INFO,
+				"block partition physical sector size is 0x%lx\n",
+				psectsz);
+
+		if (pBlkBeDevArgs->canDiscard) {
+			ret = ioctl(pBlkHostDev->fd, BLKDISCARD, probe_arg);
+			if (ret) {
+				VIRTIO_BLK_DEV_DBG(VIRTIO_BLK_DEV_DBG_ERR,
+						"not support DISCARD\n");
+				pBlkBeDevArgs->canDiscard = false;
+			}
+		}
+
+		ret = ioctl(pBlkHostDev->fd, BLKSSZGET, &pBlkHostDev->logBlkSize);
+		if (ret) {
+			VIRTIO_BLK_DEV_DBG(VIRTIO_BLK_DEV_DBG_ERR,
+					"failed to BLKSSZGET(%d)\n", ret);
+			/* fall back to physical sector size */
+			pBlkHostDev->logBlkSize = psectsz;
+		}
+
+		pBlkHostDev->phyBlkSize = psectsz;
+	} else {
+		/* TODO file-backed device needs more care here */
 	}
 
 	pBlkHostDev->blkSize = VIRTIO_BLK_SIZE;
-	pBlkHostDev->capacity = bdev_nr_sectors(pBlkHostDev->bdev);
+	pBlkHostDev->capacity = size / VIRTIO_BLK_SIZE;
 
 	VIRTIO_BLK_DEV_DBG(VIRTIO_BLK_DEV_DBG_INFO,
-			"virtioHostBlkCreateWithBlk bdev:0x%llx blkSize:%u capacity:0x%llx\n",
-			(uint64_t)pBlkHostDev->bdev, pBlkHostDev->blkSize, pBlkHostDev->capacity);
-#endif
+			"fd:%d\nblkSize:%x\nlogBlkSize:%x\nphyBlkSize:%x\ncapacity:0x%lx\n",
+			pBlkHostDev->fd,
+			pBlkHostDev->blkSize,
+			pBlkHostDev->logBlkSize,
+			pBlkHostDev->phyBlkSize,
+			pBlkHostDev->capacity);
 
-#endif /* 0 */
 	if (pBlkBeDevArgs->ro)
 		pBlkHostDev->rdOnly = true;
+#endif
+
+err:
 	return 0;
 }
 
@@ -643,26 +608,26 @@ static int virtioHostBlkBeDevCreate(struct virtioBlkHostDev *pBlkHostDev)
 
 	if (pBlkHostDev->beDevArgs.isFile) {
 		VIRTIO_BLK_DEV_DBG(VIRTIO_BLK_DEV_DBG_ERR,
-				"virtioHostBlkBeDevCreate file-backed not supported\n");
+				"file-backed not supported\n");
 	} else {
 		VIRTIO_BLK_DEV_DBG(VIRTIO_BLK_DEV_DBG_INFO,
-				"virtioHostBlkBeDevCreate harddisk\n");
+				"creating disk-backed\n");
 		ret = virtioHostBlkCreateWithBlk(pBlkHostDev);
 	}
 
 	if (ret) {
 		VIRTIO_BLK_DEV_DBG(VIRTIO_BLK_DEV_DBG_ERR,
-				"virtioHostBlkBeDevCreate failed(%d)\n", ret);
+				"failed to create back-end device(%d)\n", ret);
 		return ret;
 	}
 
-	// The rest registers are all 0
+	/* The rest registers are all 0 */
 	pBlkHostCtx->cfg.capacity = host_virtio64_to_cpu(&pBlkHostCtx->vhost,
 			pBlkHostDev->capacity);
 	pBlkHostCtx->cfg.seg_max  = host_virtio32_to_cpu(&pBlkHostCtx->vhost,
 			BLOCK_IO_REQ_MAX);
 	pBlkHostCtx->cfg.blk_size = host_virtio32_to_cpu(&pBlkHostCtx->vhost,
-			bdev_logical_block_size(pBlkHostDev->bdev));
+			pBlkHostDev->logBlkSize);
 	pBlkHostCtx->cfg.num_queues = (uint16_t)host_virtio16_to_cpu(&pBlkHostCtx->vhost,
 			VIRTIO_BLK_QUEUE_MAX_NUM);
 
@@ -682,8 +647,7 @@ static int virtioHostBlkBeDevCreate(struct virtioBlkHostDev *pBlkHostDev)
 	}
 
 	VIRTIO_BLK_DEV_DBG(VIRTIO_BLK_DEV_DBG_INFO,
-			"pBlkHostCtx->feature:0x%lx\n",
-			pBlkHostCtx->feature);
+			"pBlkHostCtx->feature:0x%lx\n", pBlkHostCtx->feature);
 
 	return 0;
 }
@@ -701,47 +665,35 @@ static int virtioHostBlkBeDevCreate(struct virtioBlkHostDev *pBlkHostDev)
 
 static int virtioBlkHostIdentGet(struct virtioBlkHostDev *pBlkHostDev)
 {
-	uint8_t md5_hash[16];
-	struct crypto_shash *alg = NULL;
+	uint8_t digest[16];
+	int ret;
 
-	alg = crypto_alloc_shash("md5", 0, 0);
-	if (IS_ERR(alg)) {
-		VIRTIO_BLK_DEV_DBG(VIRTIO_BLK_DEV_DBG_INFO,
-				   "could not allocate shash TFM %ld\n",
-				   PTR_ERR(alg));
-		return PTR_ERR(alg);
-	}
-#if 0
-	struct shash_desc *sdesc = NULL;
-
-
-	sdesc = kmalloc(sizeof(struct shash_desc) + crypto_shash_descsize(alg),
-			GFP_KERNEL);
-	if (!sdesc) {
-		VIRTIO_BLK_DEV_DBG(VIRTIO_BLK_DEV_DBG_INFO,
-				"virtioBlkHostIdentGet failed to allocate memory\n");
-		return -ENOMEM;
-	}
-
-	sdesc->tfm = alg;
-
-	crypto_shash_init(sdesc);
-	crypto_shash_update(sdesc, pBlkHostDev->beDevArgs.bePath,
-			strlen(pBlkHostDev->beDevArgs.bePath));
-	crypto_shash_final(sdesc, md5_hash);
-	crypto_free_shash(sdesc->tfm);
-	sdesc->tfm = NULL;
-	kfree_sensitive(sdesc);
+	/*
+	 * Create an identifier for the backing file. Use parts of the
+	 * md5 sum of the filename
+	 */
+#if OPENSSL_VERSION_NUMBER >= 0x30000000L
+	EVP_MD_CTX *mdctx = EVP_MD_CTX_new();
+	EVP_DigestInit_ex(mdctx, EVP_md5(), NULL);
+	EVP_DigestUpdate(mdctx, pBlkHostDev->beDevArgs.bePath, strlen(pBlkHostDev->beDevArgs.bePath));
+	EVP_DigestFinal_ex(mdctx, digest, NULL);
+	EVP_MD_CTX_free(mdctx);
+#else
+	MD5_CTX mdctx;
+	MD5_Init(&mdctx);
+	MD5_Update(&mdctx, pBlkHostDev->beDevArgs.bePath, strlen(pBlkHostDev->beDevArgs.bePath));
+	MD5_Final(digest, &mdctx);
 #endif
-	(void)snprintf(pBlkHostDev->ident, VIRTIO_BLK_DISK_ID_BYTES + 1,
-			"WRHV--%02X%02X-%02X%02X-%02X%02X",
-			md5_hash[0], md5_hash[1], md5_hash[2],
-			md5_hash[3], md5_hash[4], md5_hash[5]);
+	ret = snprintf(pBlkHostDev->ident, VIRTIO_BLK_DISK_ID_BYTES + 1,
+			"VIRT--%02X%02X-%02X%02X-%02X%02X",
+			digest[0], digest[1], digest[2],
+			digest[3], digest[4], digest[5]);
+	if (ret > VIRTIO_BLK_DISK_ID_BYTES + 1 || ret < 0)
+		VIRTIO_BLK_DEV_DBG(VIRTIO_BLK_DEV_DBG_ERR,
+				"device name is invalid\n");
  
 	VIRTIO_BLK_DEV_DBG(VIRTIO_BLK_DEV_DBG_INFO,
-			   "ident:%s\n",
-			   pBlkHostDev->ident);
-
+			"ident:%s\n", pBlkHostDev->ident);
 	return 0;
 }
 
@@ -769,11 +721,6 @@ static int virtioHostBlkDevCreate(struct virtioBlkHostDev *pBlkHostDev)
 	pBlkHostCtx   = (struct virtioBlkHostCtx *)pBlkHostDev;
 	pBlkBeDevArgs = &pBlkHostDev->beDevArgs;
 
-	/* initialize virtio block host device context */
-	TAILQ_INIT(&pBlkHostCtx->pendReqList);
-
-	pthread_mutex_init(&pBlkHostCtx->listLock, NULL);
-
 	/* create virtio block host device ident */
 	if (virtioBlkHostIdentGet(pBlkHostDev))
 		goto err;
@@ -794,9 +741,9 @@ static int virtioHostBlkDevCreate(struct virtioBlkHostDev *pBlkHostDev)
 			0, NULL,
 			&virtioBlkHostOps);
 	if (ret) {
-		VIRTIO_BLK_DEV_DBG (VIRTIO_BLK_DEV_DBG_ERR,
-				"%s: virtio block host context creating failed %d\n",
-				__FUNCTION__, ret);
+		VIRTIO_BLK_DEV_DBG(VIRTIO_BLK_DEV_DBG_ERR,
+				"virtio block host context creating failed %d\n",
+				ret);
 		goto err;
 	}
 
@@ -808,34 +755,17 @@ static int virtioHostBlkDevCreate(struct virtioBlkHostDev *pBlkHostDev)
 
 	pthread_mutex_unlock(&vBlkHostDrv.drvLock);
 
-#if 0
-	INIT_WORK(&pBlkHostCtx->work, virtioHostBlkReqHandle);
-
-	pBlkHostCtx->workqueue = alloc_workqueue("kvblkd%d",
-			0, 512, devNum);
-	if (!pBlkHostCtx->workqueue) {
-		VIRTIO_BLK_DEV_DBG (VIRTIO_BLK_DEV_DBG_ERR,
-				"%s: failed to create virtio block host kworker\n",
-				__FUNCTION__);
-		goto err;
-	}
-#endif
-	pBlkHostCtx->work_thread_created = false;
 	ret = pthread_create(&pBlkHostCtx->work_thread, NULL, virtioHostBlkReqHandle, pBlkHostCtx);
 	if (ret) {
 		VIRTIO_BLK_DEV_DBG(VIRTIO_BLK_DEV_DBG_ERR,
-				"%s: failed to create virtio block host worker thread\n",
-				__FUNCTION__);
+				"failed to create virtio block host worker thread\n");
 		goto err;
 	}
 
-	pBlkHostCtx->work_thread_created = true;
-	rc = sem_init(&pBlkHostCtx->work_sem, 0, 0);                        
-	if (rc) {                                                        
+	ret = sem_init(&pBlkHostCtx->work_sem, 0, 0);                        
+	if (ret) {                                                        
 		VIRTIO_BLK_DEV_DBG(VIRTIO_BLK_DEV_DBG_ERR,                   
-				   "Failed to create VSM request "
-				   "queue %d sem(%d)\n",
-				   queueId, rc);
+				"Failed to create block work thread 0x%ld sem(%d)\n", pBlkHostCtx->work_thread, ret);
 		goto err;
 	}
 
@@ -844,6 +774,95 @@ static int virtioHostBlkDevCreate(struct virtioBlkHostDev *pBlkHostDev)
 err:
 	virtioHostBlkDrvRelease();
 	return -1;
+}
+
+/*******************************************************************************
+ *
+ * dmStrtol - convert string to long int
+ *
+ * This routine is a wrapper of strtol.
+ *
+ * RETURNS: 0 on success or -1 according to errno
+ *
+ * ERRNO: N/A
+ */
+
+int dmStrtol(const char *s, char **end, unsigned int base, long *val)
+{
+	if (!s)
+		return -1;
+
+	*val = strtol(s, end, base);
+	if ((end && *end == s) || errno == ERANGE)
+		return -1;
+	return 0;
+}
+
+/*******************************************************************************
+ *
+ * dmStrtoi - convert string to int
+ *
+ * This routine is a wrapper of strtoi.
+ *
+ * RETURNS: 0 on success or -1 according to errno
+ *
+ * ERRNO: N/A
+ */
+int dmStrtoi(const char *s, char **end, unsigned int base, int *val)
+{
+	long l_val;
+	int ret;
+
+	l_val = 0;
+	ret = dmStrtol(s, end, base, &l_val);
+	if (ret == 0)
+		*val = (int)l_val;
+	return ret;
+}
+
+/*******************************************************************************
+ *
+ * dmStrtoul - convert string to unsigned long
+ *
+ * This routine is a wrapper of strtoul.
+ *
+ * RETURNS: 0 on success or -1 according to errno
+ *
+ * ERRNO: N/A
+ */
+
+int dmStrtoul(const char *s, char **end, unsigned int base, unsigned long *val)
+{
+	if (!s)
+		return -1;
+
+	*val = strtoul(s, end, base);
+	if ((end && *end == s) || errno == ERANGE)
+		return -1;
+	return 0;
+}
+
+/*******************************************************************************
+ *
+ * dmStrtoui - convert string to unsigned int
+ *
+ * This routine is a wrapper of strtoui.
+ *
+ * RETURNS: 0 on success or -1 according to errno
+ *
+ * ERRNO: N/A
+ */
+
+int dmStrtoui(const char *s, char **end, unsigned int base, unsigned int *val)
+{
+	unsigned long l_val;
+	int ret;
+
+	l_val = 0;
+	ret = dmStrtoul(s, end, base, &l_val);
+	if (ret == 0)
+		*val = (unsigned int)l_val;
+	return ret;
 }
 
 /*******************************************************************************
@@ -858,257 +877,143 @@ err:
  * ERRNO: N/A
  */
 
-static int virtioHostBlkParseArgs(struct virtioBlkBeDevArgs *pBlkBeDevArgs, char *pArgs, uint32_t len)
+static int virtioHostBlkParseArgs(struct virtioBlkBeDevArgs *pBlkBeDevArgs, char *pArgs)
 {
-	char *          p0;
-	char *          p1;
-	char *          p2;
-	char *          p3;
-	char *          p4;
-	int             ret;
-	int             base;
-	uint32_t *      pVal32;
-	uint64_t *      pVal64;
+	char *nopt, *xopts, *cp;
+	int ret = 0;
 
-	ret = 0;
-	pBlkBeDevArgs->writeThru  = 1;
+	pBlkBeDevArgs->isFile = false;
+	pBlkBeDevArgs->writeThru = false;
 	pBlkBeDevArgs->sectorSize = VIRTIO_BLK_SIZE;
 
 	VIRTIO_BLK_DEV_DBG(VIRTIO_BLK_DEV_DBG_INFO,
 			"virtioHostBlkParseArgs %s\n", pArgs);
 
-	p0 = pArgs;
-	p3 = p0 + len;
+	nopt = xopts = strdup(pArgs);
+	if (!nopt) {
+		VIRTIO_BLK_DEV_DBG(VIRTIO_BLK_DEV_DBG_ERR,
+				"failed to strdup pArgs\n");
+		return -EINVAL;
+	}
 
-	for (p1 = p0; p1 <= p3; p1++)
-	{
-		if ((*p1 == ',') || (*p1 == '\0'))
-		{
-			/* reach to ',' or reach to ending */
-			len = (uint32_t)(p1 - p0);
-
-			if (len == 0)
-			{
-				/* reached the list end, parsed done */
-				break;
-			}
-
-			p2 = strstr(p0, "be=");
-			if (p2 == p0)
-			{
-				if (p0 != pArgs)
-				{
-					VIRTIO_BLK_DEV_DBG (VIRTIO_BLK_DEV_DBG_ERR, "%s: be = xxx "\
-							"must be the first argument!\n",
-							__FUNCTION__);
-					ret = -EINVAL;
-					goto done;
-				}
-
-				p0 += (sizeof("be=") - 1);
-				*p1 = '\0';
-
-				strncpy(pBlkBeDevArgs->bePath, p0, PATH_MAX);
-				pBlkBeDevArgs->bePath[PATH_MAX] = '\0';
-				p4 = pBlkBeDevArgs->bePath + strlen(pBlkBeDevArgs->bePath);
-				if (p4 > p0)
-				{
-					//if (pathIsSep (*(p4 - 1))) zhe
-					if (*(p4 - 1) == '/')
-					{
-						*(p4 - 1) = '\0';
-					}
-				}
-				else
-				{
-					VIRTIO_BLK_DEV_DBG (VIRTIO_BLK_DEV_DBG_ERR,
-							"%s: be=null!\n", __FUNCTION__);
-					ret = -EINVAL;
-					goto done;
-				}
-
-				if (strchr(pBlkBeDevArgs->bePath + 1, '/'))
-				{
-					pBlkBeDevArgs->isFile = true;
-				}
-				else
-				{
-					pBlkBeDevArgs->isFile = false;
-				}
-			}
-			else if ((!strncmp (p0, "writethru", len)) &&
-					(len== (sizeof ("writethru") - 1)))
-			{
-				pBlkBeDevArgs->writeThru = 1;
-			}
-			else if ((!strncmp (p0, "writeback", len)) &&
-					(len == (sizeof ("writeback") - 1)))
-			{
-				pBlkBeDevArgs->writeThru = 0;
-			}
-			else if (!strncmp (p0, "ro", len))
-			{
-				pBlkBeDevArgs->ro = true;
-			}
-			else if (!strncmp(p0, "sectorsize", (sizeof ("sectorsize") - 1)))
-			{
-				/*
-				 * sectorsize=<sector size>
-				 * or
-				 * sectorsize=<sector size>/<physical sector size>
-				 */
-
-				p0 += (sizeof ("sectorsize") - 1);
-
-				if (*p0++ != '=')
-				{
-					VIRTIO_BLK_DEV_DBG (VIRTIO_BLK_DEV_DBG_ERR,
-							"%s: incorrect format! \n", __FUNCTION__);
-					ret = -EINVAL;
-					goto done;
-				}
-
-				for (p2 = p0; p2 <= p1; p2++)
-				{
-					if ((*p2 == '/') || (p2 == p1))
-					{
-						*p2 = '\0';
-
-						HEX_CODE_CHECK(p0, base);
-
-						if (pBlkBeDevArgs->sectorSize == 0)
-						{
-							pVal32 = &pBlkBeDevArgs->sectorSize;;
-						}
-						else
-						{
-							pVal32 = &pBlkBeDevArgs->phySectorSize;
-						}
-
-						*pVal32 = (uint32_t)strtoul (p0, NULL, base);
-
-						p0 = p2 + 1;
-					}
-				}
-			}
-			else if (!strncmp(p0, "range", (sizeof ("range") - 1)))
-			{
-
-				/* range=<start lba in file>/<sub file size> */
-
-				p0 += (sizeof ("range") - 1);
-
-				if (*p0++ != '=')
-				{
-					VIRTIO_BLK_DEV_DBG (VIRTIO_BLK_DEV_DBG_ERR,
-							"%s: incorrect format! \n", __FUNCTION__);
-					ret = -EINVAL;
-					goto done;
-				}
-
-				for (p2 = p0; p2 <= p1; p2++)
-				{
-					if ((*p2 == '/') || (p2 == p1))
-					{
-						HEX_CODE_CHECK(p0, base);
-
-						if (*p2 == '/')
-						{
-							pVal64 = &pBlkBeDevArgs->subFileLba;
-						}
-						else
-						{
-							pVal64 = &pBlkBeDevArgs->subFileSize;
-						}
-
-						*p2 = '\0';
-						*pVal64 = strtoull (p0, NULL, base);
-
-						p0 = p2 + 1;
-					}
-				}
-
-				pBlkBeDevArgs->subFile = true;
-			}
+	while (xopts != NULL) {
+		cp = strsep(&xopts, ",");
+		if (cp == nopt) { /* file or device pathname */
+			if (!strncmp(cp, "be=", 3))
+				strncpy(pBlkBeDevArgs->bePath, nopt + 3, PATH_MAX);
 			else
-			{
-				VIRTIO_BLK_DEV_DBG (VIRTIO_BLK_DEV_DBG_ERR,
-						"%s: unknown argument %s! \n",
-						__FUNCTION__, p0);
-				ret = -EINVAL;
-				goto done;
+				VIRTIO_BLK_DEV_DBG(VIRTIO_BLK_DEV_DBG_ERR,
+						"device option must start with be=\n");
+			continue;
+		} else if (!strcmp(cp, "writeback"))
+			pBlkBeDevArgs->writeThru = false;
+		else if (!strcmp(cp, "writethru"))
+			pBlkBeDevArgs->writeThru = true;
+		else if (!strcmp(cp, "ro"))
+			pBlkBeDevArgs->ro = true;
+		else if (!strncmp(cp, "discard", strlen("discard"))) {
+			strsep(&cp, "=");
+			if (cp != NULL) {
+				if (!(!dmStrtoi(cp, &cp, 10, &pBlkBeDevArgs->maxDiscardSectors) &&
+					*cp == ':' &&
+					!dmStrtoi(cp + 1, &cp, 10, &pBlkBeDevArgs->maxDiscardSeg) &&
+					*cp == ':' &&
+					!dmStrtoi(cp + 1, &cp, 10, &pBlkBeDevArgs->discardSectorAlignment)))
+					goto err;
 			}
-			p0 = p1 + 1;
+			pBlkBeDevArgs->canDiscard = true;
+		} else if (!strncmp(cp, "sectorsize", strlen("sectorsize"))) {
+			/*
+			 *  sectorsize=<sector size>
+			 * or
+			 *  sectorsize=<sector size>/<physical sector size>
+			 */
+			if (strsep(&cp, "=") && !dmStrtoi(cp, &cp, 10, &pBlkBeDevArgs->sectorSize)) {
+				pBlkBeDevArgs->phySectorSize = pBlkBeDevArgs->sectorSize;
+				if (*cp == '/' &&
+					dmStrtoi(cp + 1, &cp, 10, &pBlkBeDevArgs->phySectorSize) < 0)
+					goto err;
+			} else {
+				goto err;
+			}
+		} else if (!strncmp(cp, "range", strlen("range"))) {
+			/* range=<start lba>/<subfile size> */
+			if (strsep(&cp, "=") &&
+				!dmStrtol(cp, &cp, 10, &pBlkBeDevArgs->subFileLba) &&
+				*cp == '/' &&
+				!dmStrtol(cp + 1, &cp, 10, &pBlkBeDevArgs->subFileSize))
+				pBlkBeDevArgs->subFile = true;
+			else
+				goto err;
+		} else {
+			VIRTIO_BLK_DEV_DBG(VIRTIO_BLK_DEV_DBG_INFO,
+					"invalid device option(%s)\n", cp);
+			goto err;
 		}
 	}
 
-	if (pBlkBeDevArgs->sectorSize != VIRTIO_BLK_SIZE)
-	{
-		VIRTIO_BLK_DEV_DBG (VIRTIO_BLK_DEV_DBG_ERR,
-				"%s: sector size must equal to %d\n", __FUNCTION__, VIRTIO_BLK_SIZE);
+	if (pBlkBeDevArgs->sectorSize != VIRTIO_BLK_SIZE) {
+		VIRTIO_BLK_DEV_DBG(VIRTIO_BLK_DEV_DBG_ERR,
+				"logical sector size must equal to %d\n", VIRTIO_BLK_SIZE);
 		ret = -EINVAL;
-		goto done;
+		goto err;
 	}
 
-	if ((pBlkBeDevArgs->subFile) && (pBlkBeDevArgs->subFileSize == 0))
-	{
+	if ((pBlkBeDevArgs->subFile) && (pBlkBeDevArgs->subFileSize == 0)) {
 		VIRTIO_BLK_DEV_DBG (VIRTIO_BLK_DEV_DBG_ERR,
-				"%s: subFile size is not allowed equal to zero\n",
-				__FUNCTION__);
+				"subFile size is not allowed equal to zero\n");
 		ret = -EINVAL;
-		goto done;
+		goto err;
 	}
 
 #ifdef VIRTIO_BLK_DEV_DBG_ON
-	VIRTIO_BLK_DEV_DBG (VIRTIO_BLK_DEV_DBG_ARGS,
-			"%s: back device arguments \n", __FUNCTION__);
-	VIRTIO_BLK_DEV_DBG (VIRTIO_BLK_DEV_DBG_ARGS,
-			"\t back device [%s] \n", pBlkBeDevArgs->bePath);
+	VIRTIO_BLK_DEV_DBG(VIRTIO_BLK_DEV_DBG_ARGS, "back device arguments\n");
+	VIRTIO_BLK_DEV_DBG(VIRTIO_BLK_DEV_DBG_ARGS,
+			"\t back device [%s]\n", pBlkBeDevArgs->bePath);
 
-	if (pBlkBeDevArgs->ro)
-	{
-		VIRTIO_BLK_DEV_DBG (VIRTIO_BLK_DEV_DBG_ARGS,
+	if (pBlkBeDevArgs->ro) {
+		VIRTIO_BLK_DEV_DBG(VIRTIO_BLK_DEV_DBG_ARGS,
 				"\t back device is [read-only]\n");
 	}
 
-	if (pBlkBeDevArgs->isFile)
-	{
-		VIRTIO_BLK_DEV_DBG (VIRTIO_BLK_DEV_DBG_ARGS,
+	if (pBlkBeDevArgs->isFile) {
+		VIRTIO_BLK_DEV_DBG(VIRTIO_BLK_DEV_DBG_ARGS,
 				"\t back device is [back file]\n");
 
-		if (pBlkBeDevArgs->subFile)
-		{
-			VIRTIO_BLK_DEV_DBG (VIRTIO_BLK_DEV_DBG_ARGS,
+		if (pBlkBeDevArgs->subFile) {
+			VIRTIO_BLK_DEV_DBG(VIRTIO_BLK_DEV_DBG_ARGS,
 					"\t     back device is [sub-file]\n" \
-					"\t     sub-file start [0x%llx]\n" \
-					"\t     sub-file size [0x%llx]\n", \
+					"\t     sub-file start [0x%lx]\n" \
+					"\t     sub-file size [0x%lx]\n", \
 					pBlkBeDevArgs->subFileLba * pBlkBeDevArgs->sectorSize,
 					pBlkBeDevArgs->subFileSize * pBlkBeDevArgs->sectorSize);
 		}
-	}
-	else
-	{
-		VIRTIO_BLK_DEV_DBG (VIRTIO_BLK_DEV_DBG_ARGS,
+	} else {
+		VIRTIO_BLK_DEV_DBG(VIRTIO_BLK_DEV_DBG_ARGS,
 				"\t back device is [disk partition]\n");
 	}
 
-	if (pBlkBeDevArgs->writeThru)
-	{
-		VIRTIO_BLK_DEV_DBG (VIRTIO_BLK_DEV_DBG_ARGS,
+	if (pBlkBeDevArgs->writeThru) {
+		VIRTIO_BLK_DEV_DBG(VIRTIO_BLK_DEV_DBG_ARGS,
 				"\t back device support [write-through]\n");
-	}
-	else
-	{
-		VIRTIO_BLK_DEV_DBG (VIRTIO_BLK_DEV_DBG_ARGS,
+	} else {
+		VIRTIO_BLK_DEV_DBG(VIRTIO_BLK_DEV_DBG_ARGS,
 				"\t back device support [write-back]\n");
 	}
 
-	VIRTIO_BLK_DEV_DBG (VIRTIO_BLK_DEV_DBG_ARGS,
-			"\t back device sector size [%d]\n",
+	VIRTIO_BLK_DEV_DBG(VIRTIO_BLK_DEV_DBG_ARGS,
+			"\t back device logical sector size [%d]\n",
 			pBlkBeDevArgs->sectorSize);
+
+	VIRTIO_BLK_DEV_DBG(VIRTIO_BLK_DEV_DBG_ARGS,
+			"\t back device physical sector size [%d]\n",
+			pBlkBeDevArgs->phySectorSize);
 #endif /* VIRTIO_BLK_DEV_DBG_ON */
 
-done:
+err:
+	if (nopt)
+		free(nopt);
+
 	return ret;
 }
 
@@ -1129,34 +1034,31 @@ static int virtioHostBlkCreate(struct virtioHostDev *pHostDev)
 {
 	struct virtioBlkHostDev *pBlkHostDev;
 	struct virtioBlkBeDevArgs *pBeDevArgs;
-	uint32_t len;
 	char *pBuf;
 	int ret;
 
 	VIRTIO_BLK_DEV_DBG(VIRTIO_BLK_DEV_DBG_INFO, "virtioHostBlkCreate start\n");
 
 	if (!pHostDev) {
-		VIRTIO_BLK_DEV_DBG (VIRTIO_BLK_DEV_DBG_ERR,
-				"%s: pChannel is NULL!\n", __FUNCTION__);
+		VIRTIO_BLK_DEV_DBG(VIRTIO_BLK_DEV_DBG_ERR,
+				"pChannel is NULL!\n");
 		return -EINVAL;
 	}
 
 	/* the virtio channel number is always one */
 	if (pHostDev->channelNum > 1) {
-		VIRTIO_BLK_DEV_DBG (VIRTIO_BLK_DEV_DBG_ERR, "%s channel number is %d " \
-				"only one channel is supported\n",
-				__FUNCTION__, pHostDev->channelNum);
+		VIRTIO_BLK_DEV_DBG(VIRTIO_BLK_DEV_DBG_ERR, "channel number is %d " \
+				"only one channel is supported\n", pHostDev->channelNum);
 		return -EINVAL;
 	}
 
-	VIRTIO_BLK_DEV_DBG (VIRTIO_BLK_DEV_DBG_INFO, "%s:\n"
+	VIRTIO_BLK_DEV_DBG(VIRTIO_BLK_DEV_DBG_INFO, "\n"
 			"  typeId = %d args %s channelNum = %d\n" \
 			"    - channel ID = %d \n"  \
 			"      hpaddr = 0x%lx \n" \
 			"      gpaddr = 0x%lx \n" \
 			"      cpaddr = 0x%lx \n" \
 			"      size   = 0x%lx \n",
-			__FUNCTION__,
 			pHostDev->typeId, pHostDev->args, pHostDev->channelNum,
 			pHostDev->channels[0].channelId,
 			pHostDev->channels[0].pMap->entry->hpaddr,
@@ -1165,9 +1067,9 @@ static int virtioHostBlkCreate(struct virtioHostDev *pHostDev)
 			pHostDev->channels[0].pMap->entry->size);
 
 	if (vBlkHostDrv.vBlkHostDevNum == VIRTIO_BLK_HOST_DEV_MAX) {
-		VIRTIO_BLK_DEV_DBG (VIRTIO_BLK_DEV_DBG_ERR,
-				"%s no more than %d block devices can be created\n",
-				__FUNCTION__, VIRTIO_BLK_HOST_DEV_MAX);
+		VIRTIO_BLK_DEV_DBG(VIRTIO_BLK_DEV_DBG_ERR,
+				"no more than %d block devices can be created\n",
+				VIRTIO_BLK_HOST_DEV_MAX);
 		return -ENOENT;
 	}
 
@@ -1175,12 +1077,11 @@ static int virtioHostBlkCreate(struct virtioHostDev *pHostDev)
 			"virtioHostBlkCreate sizeof(struct virtioBlkHostDev) %ld bytes\n",
 			sizeof(struct virtioBlkHostDev));
 
-	//sizeof(struct virtioBlkHostDev) == 0x8311A0
 	pBlkHostDev = calloc(1, sizeof(struct virtioBlkHostDev));
 	if (!pBlkHostDev) {
-		VIRTIO_BLK_DEV_DBG (VIRTIO_BLK_DEV_DBG_ERR,
-				"%s: allocate memory failed for virtio block " \
-				"host device failed! \n", __FUNCTION__);
+		VIRTIO_BLK_DEV_DBG(VIRTIO_BLK_DEV_DBG_ERR,
+				"allocate memory failed for virtio block " \
+				"host device failed!\n");
 		return -ENOMEM;
 	}
 
@@ -1191,9 +1092,8 @@ static int virtioHostBlkCreate(struct virtioHostDev *pHostDev)
 
 	pBuf = pHostDev->args;
 	pHostDev->args[PATH_MAX - 1] = '\0';
-	len = strlen(pHostDev->args);
 
-	ret = virtioHostBlkParseArgs(pBeDevArgs, pBuf, len);
+	ret = virtioHostBlkParseArgs(pBeDevArgs, pBuf);
 	if (ret)
 		goto exit;
 
@@ -1245,35 +1145,26 @@ static void virtioHostBlkAbort(struct virtioHostQueue *pQueue, uint16_t idx)
  * ERRNO: N/A
  */
 
-static void* virtioHostBlkReqHandle(void* arg)
+static void* virtioHostBlkReqHandle(void *pBlkHostCtx)
 {
 	int n;
 	uint16_t idx;
 	struct virtioHost *vhost;
-	struct virtioBlkHostCtx *pBlkHostCtx = (struct virtioBlkHostCtx*)arg;
-	volatile struct virtioBlkReqHdr *pReqHdr;
+	struct virtioBlkReqHdr *pReqHdr;
 	struct virtioBlkHostCtx *vBlkHostCtx = pBlkHostCtx;
 	struct virtioBlkHostDev *vBlkHostDev;
 	struct virtioBlkIoReq *pBlkReq;
 	struct virtioHostBuf bufList[BLOCK_IO_REQ_MAX + 2];
 	int rc;
 
-	__virtio32 *ptype;
-	__virtio64 *psector;
-#if 0
-	vBlkHostCtx = container_of(work, struct virtioBlkHostCtx, work);
-	if (!vBlkHostCtx)
-		VIRTIO_BLK_DEV_DBG(VIRTIO_BLK_DEV_DBG_INFO,
-				"%s null vBlkHostCtx\n", __FUNCTION__);
-#endif
 	vhost = (struct virtioHost *)vBlkHostCtx;
 	vBlkHostDev = (struct virtioBlkHostDev *)vBlkHostCtx;
 
         while(1) {                                                                   
                 rc = sem_wait(&vBlkHostCtx->work_sem);
                 if (rc < 0) {
-                        VIRTIO_BLK_DEV_DBG(VIRTIO_BLK_DEV_DBG_ERR,
-					   "failed to work_sem\n");
+			VIRTIO_BLK_DEV_DBG(VIRTIO_BLK_DEV_DBG_ERR,
+					"failed to sem_wait work_sem: %s\n", strerror(errno));
                         continue;
                 }
 
@@ -1282,22 +1173,20 @@ static void* virtioHostBlkReqHandle(void* arg)
 					BLOCK_IO_REQ_MAX + 2);
 			if (n == 0) {
 				VIRTIO_BLK_DEV_DBG(VIRTIO_BLK_DEV_DBG_INFO,
-						   "no new queue buffer\n");
+						"no new queue buffer\n");
 				break;
 			}
 
 			if (n < 0) {
 				VIRTIO_BLK_DEV_DBG(VIRTIO_BLK_DEV_DBG_ERR,
-						   "failed to get buffer %d\n",
-						   n);
-
+						"failed to get buffer(%d)\n", n);
 				break;
 			}
 
 			if ((n < 2) || (n > BLOCK_IO_REQ_MAX + 2)) {
 				VIRTIO_BLK_DEV_DBG(VIRTIO_BLK_DEV_DBG_ERR,
-						   "invalid length of desc chain: %d, 2 to %d is valid\n",
-						   n, BLOCK_IO_REQ_MAX + 2);
+						"invalid length of desc chain: %d, while 2 to %d is valid\n",
+						n, BLOCK_IO_REQ_MAX + 2);
 
 				virtioHostBlkAbort(vhost->pQueue, vhost->pQueue->availIdx);
 				continue;
@@ -1306,21 +1195,16 @@ static void* virtioHostBlkReqHandle(void* arg)
 			pReqHdr = (struct virtioBlkReqHdr *)bufList[0].buf;
 
 #ifdef VIRTIO_BLK_PERF
-			pReqHdr->time2 = ktime_get_real_fast_ns();
+			clock_gettime(CLOCK_MONOTONIC, &pReqHdr->time2);
 #endif
 
-			ptype   = (__virtio32 *)((unsigned char*)pReqHdr + offsetof(struct virtioBlkReqHdr, type));
-			psector = (__virtio64 *)((unsigned char*)pReqHdr + offsetof(struct virtioBlkReqHdr, sector));
-
-			pReqHdr->type = host_virtio32_to_cpu(vhost, host_readl(ptype));
-			pReqHdr->sector = host_virtio64_to_cpu(
-				vhost,
-				host_readq((uint64_t*)psector));
+			pReqHdr->type = host_virtio32_to_cpu(vhost, host_readl(&pReqHdr->type));
+			pReqHdr->sector = host_virtio64_to_cpu(vhost, host_readq(&pReqHdr->sector));
 
 			if (bufList[0].flags & VRING_DESC_F_WRITE) {
 				VIRTIO_BLK_DEV_DBG(VIRTIO_BLK_DEV_DBG_ERR,
-						   "invalid header flag: "
-						   "VRING_DESC_F_WRITE\n");
+						"invalid header flag: "
+						"VRING_DESC_F_WRITE\n");
 
 				virtioHostBlkAbort(vhost->pQueue, vhost->pQueue->availIdx);
 				continue;
@@ -1340,14 +1224,13 @@ static void* virtioHostBlkReqHandle(void* arg)
 			pBlkReq->offset = pReqHdr->sector;
 
 			VIRTIO_BLK_DEV_DBG(VIRTIO_BLK_DEV_DBG_INFO,
-					"%s request type:%x sector:%lx\n",
-					__FUNCTION__, pReqHdr->type, pReqHdr->sector);
+					"request type:%x sector:%lx\n",
+					pReqHdr->type, pReqHdr->sector);
 
 			if (pReqHdr->type == VIRTIO_BLK_T_OUT) {
 				if (vBlkHostDev->rdOnly) {
 					VIRTIO_BLK_DEV_DBG(VIRTIO_BLK_DEV_DBG_ERR,
-							"%s cannot write on read-only device\n",
-							__FUNCTION__);
+							"cannot write on read-only device\n");
 					virtioHostBlkDone(pBlkReq, vhost->pQueue, EROFS);
 					continue;
 				}
@@ -1360,7 +1243,7 @@ static void* virtioHostBlkReqHandle(void* arg)
 				virtioHostBlkSubmitBio(pBlkReq);
 				continue;
 			} else if (pReqHdr->type == VIRTIO_BLK_T_FLUSH) {
-				//pBlkReq->opType = BLK_OP_FLUSH;
+				//TODO pBlkReq->opType = BLK_OP_FLUSH;
 				virtioHostBlkFlush(pBlkReq);
 				continue;
 			} else if (pReqHdr->type == VIRTIO_BLK_T_GET_ID) {
@@ -1369,22 +1252,21 @@ static void* virtioHostBlkReqHandle(void* arg)
 			} else if ((pReqHdr->type == VIRTIO_BLK_T_DISCARD) ||
 					(pReqHdr->type == VIRTIO_BLK_T_WRITE_ZEROES)) {
 				VIRTIO_BLK_DEV_DBG(VIRTIO_BLK_DEV_DBG_ERR,
-						"%s not supported request type %x\n",
-						__FUNCTION__, pReqHdr->type);
+						"not supported request type %x\n",
+						pReqHdr->type);
 
-				virtioHostBlkDone(pBlkReq, vhost->pQueue, ENOTSUPP);
+				virtioHostBlkDone(pBlkReq, vhost->pQueue, ENOTSUP);
 				continue;
 			} else {
-				VIRTIO_BLK_DEV_DBG (VIRTIO_BLK_DEV_DBG_ERR,
-						"%s unknown request type %x\n",
-						__FUNCTION__, pReqHdr->type);
+				VIRTIO_BLK_DEV_DBG(VIRTIO_BLK_DEV_DBG_ERR,
+						"unknown request type %x\n",
+						pReqHdr->type);
 
-				virtioHostBlkDone(pBlkReq, vhost->pQueue, ENOTSUPP);
+				virtioHostBlkDone(pBlkReq, vhost->pQueue, ENOTSUP);
 				continue;
 			}
 		}
 	}
-	return arg;
 }
 
 /*******************************************************************************
@@ -1402,21 +1284,20 @@ static void* virtioHostBlkReqHandle(void* arg)
 static void virtioHostBlkNotify(struct virtioHostQueue *pQueue)
 {
 	struct virtioBlkHostCtx *vBlkHostCtx;
-	int rc;
+	int ret;
 
 	if (!pQueue) {
-		VIRTIO_BLK_DEV_DBG(VIRTIO_BLK_DEV_DBG_ERR,
-				"%s null pQueue\n", __FUNCTION__);
+		VIRTIO_BLK_DEV_DBG(VIRTIO_BLK_DEV_DBG_ERR, "null pQueue\n");
 		return;
 	}
 
 	if (pQueue->vHost) {
 		if ((pQueue->vHost->status & VIRTIO_CONFIG_S_DRIVER_OK) != 0) {
 			vBlkHostCtx = (struct virtioBlkHostCtx *)pQueue->vHost;
-                	rc = sem_post(&vBlkHostCtx->work_sem);
-			if (rc)
+                	ret = sem_post(&vBlkHostCtx->work_sem);
+			if (ret)
 				VIRTIO_BLK_DEV_DBG(VIRTIO_BLK_DEV_DBG_ERR,
-						"%s failed to sem_post: %s\n", __FUNCTION__, strerror(errno));
+						"failed to sem_post work_sem: %s\n", strerror(errno));
 		}
 	}
 
@@ -1439,20 +1320,20 @@ static void virtioHostBlkNotify(struct virtioHostQueue *pQueue)
 static void virtioHostBlkDone(struct virtioBlkIoReq *pBlkReq,
 		struct virtioHostQueue *pQueue, int err)
 {
-	if (err == ENOTSUPP) {
-		VIRTIO_BLK_DEV_DBG (VIRTIO_BLK_DEV_DBG_ERR,
-				"%s general block layer unsupported\n", __FUNCTION__);
+	if (err == ENOTSUP) {
+		VIRTIO_BLK_DEV_DBG(VIRTIO_BLK_DEV_DBG_ERR,
+				"general block layer unsupported\n");
 		*pBlkReq->pStatus = VIRTIO_BLK_S_UNSUPP;
 	} else if (err) {
-		VIRTIO_BLK_DEV_DBG (VIRTIO_BLK_DEV_DBG_ERR,
-				"%s general block layers error %d\n", __FUNCTION__, err);
+		VIRTIO_BLK_DEV_DBG(VIRTIO_BLK_DEV_DBG_ERR,
+				"general block layers error %d\n", err);
 		*pBlkReq->pStatus = VIRTIO_BLK_S_IOERR;
 	} else {
 		*pBlkReq->pStatus = VIRTIO_BLK_S_OK;
 	}
 
 #ifdef VIRTIO_BLK_PERF
-	pBlkReq->pReqHdr->time5 = ktime_get_real_fast_ns();
+	clock_gettime(CLOCK_MONOTONIC, &pReqHdr->time5);
 #endif
 
 	/* write 1 status byte */
@@ -1478,16 +1359,15 @@ static void virtioHostBlkDone(struct virtioBlkIoReq *pBlkReq,
 static int virtioHostBlkReset(struct virtioHost *vHost)
 {
 	struct virtioBlkHostCtx *vBlkHostCtx;
-	int err = 0;
 
 	vBlkHostCtx = (struct virtioBlkHostCtx *)vHost;
 	if (!vBlkHostCtx) {
-		VIRTIO_BLK_DEV_DBG (VIRTIO_BLK_DEV_DBG_ERR,
-				"%s: null vBlkHostCtx\n", __FUNCTION__);
+		VIRTIO_BLK_DEV_DBG(VIRTIO_BLK_DEV_DBG_ERR,
+				"null vBlkHostCtx\n");
 		return -1;
 	}
 
-	return err;
+	return 0;
 }
 
 /*******************************************************************************
@@ -1497,7 +1377,7 @@ static int virtioHostBlkReset(struct virtioHost *vHost)
  * This routine is used to read virtio block specific configuration register,
  * the value read out is stored in the request buffer.
  *
- * RETURN: 0, or -1 if the to be read register is non-existed.
+ * RETURN: 0, or errno if the to be read register is non-existed.
  *
  * ERRNO: N/A
  */
@@ -1509,8 +1389,7 @@ static int virtioHostBlkCfgRead(struct virtioHost *vHost, uint64_t address,
 	uint8_t *cfgAddr;
 
 	if (!vHost) {
-		VIRTIO_BLK_DEV_DBG(VIRTIO_BLK_DEV_DBG_ERR, "%s null vHost\n",
-				__FUNCTION__);
+		VIRTIO_BLK_DEV_DBG(VIRTIO_BLK_DEV_DBG_ERR, "null vHost\n");
 		return -EINVAL;
 	}
 
@@ -1530,7 +1409,7 @@ static int virtioHostBlkCfgRead(struct virtioHost *vHost, uint64_t address,
  * This routine is used to set virtio block specific configuration register,
  * the setting value is stored in the request buffer.
  *
- * RETURN: 0, or -1 if the to be read register is non-existed.
+ * RETURN: 0, or errno if the to be read register is non-existed.
  *
  * ERRNO: N/A
  */
@@ -1543,8 +1422,7 @@ static int virtioHostBlkCfgWrite(struct virtioHost *vHost, uint64_t address,
 	uint8_t *cfgAddr;
 
 	if (!vHost) {
-		VIRTIO_BLK_DEV_DBG (VIRTIO_BLK_DEV_DBG_ERR,
-				"%s: NULL pointer \n", __FUNCTION__);
+		VIRTIO_BLK_DEV_DBG(VIRTIO_BLK_DEV_DBG_ERR, "null vHost\n");
 		return -EINVAL;
 	}
 
@@ -1582,7 +1460,7 @@ static void virtioHostBlkShow(struct virtioHost * vHost, uint32_t indent)
 	vBlkHostDev = (struct virtioBlkHostDev *)vHost;
 
 	printf("%*sdriver [%s]\n", (indent + 1) * 3, "", VIRTIO_BLK_DRV_NAME);
-	printf("%*scapacity [%lld]\n", (indent + 1) * 3, "", vBlkHostDev->capacity);
+	printf("%*scapacity [%lu]\n", (indent + 1) * 3, "", vBlkHostDev->capacity);
 	printf("%*sblock size [%d]\n", (indent + 1) * 3, "", vBlkHostDev->blkSize);
 
 	if (vritioHostHasFeature(vHost, VIRTIO_BLK_F_FLUSH) == VIRTIO_BLK_F_FLUSH)
