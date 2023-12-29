@@ -21,11 +21,13 @@ struct virtio_region {
         uint32_t indx;
         uint32_t offs;
         uint64_t addr;
+        uint64_t phys_addr;
         uint64_t size;
 };
 
 #define VHOST_VIRTIO_ADD_REGION _IOWR(VHOST_VIRTIO, 0x90, struct virtio_region)
 #define VHOST_VIRTIO_GET_REGION _IOWR(VHOST_VIRTIO, 0x91, struct virtio_region)
+#define VHOST_VIRTIO_ALLOC_REGION _IOWR(VHOST_VIRTIO, 0x92, struct virtio_region)
 
 #define VIRTIO_CTRL_NAME "virtio_ctrl"
 

@@ -69,6 +69,9 @@ module_param(irq, int, S_IRUGO);
  * VirtIO control device functions
  */
 
+/*
+ * Adds a region to be mapped to userspace
+ */
 static int virtioctrl_add_region(struct virtio_region* region, int memtype)
 {
         int i;
@@ -92,7 +95,7 @@ static int virtioctrl_add_region(struct virtio_region* region, int memtype)
         mem_avail_idx = i;
         if (mem_avail_idx >= MAX_UIO_MAPS) {
                 pr_err ("No memory regions available\n");
-                return -1;
+                return -EINVAL;
         }
 
         /* Fill in the new memory region info */
@@ -101,10 +104,21 @@ static int virtioctrl_add_region(struct virtio_region* region, int memtype)
         map = kzalloc(sizeof(*map), GFP_KERNEL);
         if (map == NULL ) {
                 pr_err("Memory allocation error!\n");
-                return -1;
+                return -ENOMEM;
         }
 
-        mutex_lock(&virtio_p_data.uio_dev->info_lock);
+	if (memtype == UIO_MEM_LOGICAL) {
+		region->addr = (uint64_t)kzalloc(region->size, GFP_KERNEL);
+		if (region->addr == 0x0) {
+			pr_err("Region memory allocation error!\n");
+			return -ENOMEM;
+		}
+		region->phys_addr = virt_to_phys((void*)region->addr);
+	} else if(memtype == UIO_MEM_PHYS) {
+		region->phys_addr = region->addr;
+	}
+
+	mutex_lock(&virtio_p_data.uio_dev->info_lock);
         virtio_p_data.mem[mem_avail_idx].addr = region->addr;
         virtio_p_data.mem[mem_avail_idx].size = region->size;
         virtio_p_data.mem[mem_avail_idx].memtype = memtype;
@@ -158,6 +172,18 @@ long int virtioctrl_ioctl (struct file* dev,
         int error;
 
         switch (ioctl) {
+        case VHOST_VIRTIO_ALLOC_REGION:
+		if (copy_from_user(&region, regp, sizeof(region))) {
+                        return -EFAULT;
+                }
+                error = virtioctrl_add_region(&region, UIO_MEM_LOGICAL);
+                if (error != 0) {
+                        return error;
+                }
+                if (copy_to_user(regp, &region, sizeof(region))) {
+                        return -EFAULT;
+                }
+		break;
         case VHOST_VIRTIO_ADD_REGION:
                 if (copy_from_user(&region, regp, sizeof(region))) {
                         return -EFAULT;
@@ -188,6 +214,14 @@ long int virtioctrl_ioctl (struct file* dev,
                         region.offs = reg_index * PAGE_SIZE;
                         region.addr = virtio_p_data.mem[reg_index].addr;
                         region.size = virtio_p_data.mem[reg_index].size;
+			if (virtio_p_data.mem[reg_index].memtype ==
+			    UIO_MEM_PHYS) {
+				region.phys_addr = region.addr;
+			} else if (virtio_p_data.mem[reg_index].memtype ==
+				   UIO_MEM_LOGICAL) {
+				region.phys_addr =
+					virt_to_phys((void*)region.addr);
+			}
                 }
                 mutex_unlock(&virtio_p_data.uio_dev->info_lock);
                 if (regsize == 0) {
