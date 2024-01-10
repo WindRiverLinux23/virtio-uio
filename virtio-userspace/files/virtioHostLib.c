@@ -33,7 +33,7 @@ logic, such as configuration handling or queue handling.
 #include <string.h>
 #include <stddef.h>
 #include <linux/virtio_mmio.h>
-#include "virtio_host_lib.h"
+#include "virtioHostLib.h"
 #include "virtio_host_parser.h"
 
 /* defines */
