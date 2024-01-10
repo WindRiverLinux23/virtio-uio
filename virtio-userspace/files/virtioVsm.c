@@ -1381,6 +1381,7 @@ int virtioHostEventHandler(struct virtio_device* vdev)
 	if ((status & VIRTIO_MMIO_INT_CONFIG) != 0U) {
 		VIRTIO_VSM_DBG_MSG(VIRTIO_VSM_DBG_INFO,
 				   "config event\n");
+		virtioConfigChange(vdev);
 	}
 	if ((status & VIRTIO_MMIO_INT_VRING) != 0U) {
 		VIRTIO_VSM_DBG_MSG(VIRTIO_VSM_DBG_INFO,

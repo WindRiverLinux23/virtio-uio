@@ -1174,3 +1174,21 @@ size_t virtioRegionGet(int ctrl_fd, PHYS_ADDR addr, size_t size,
 	*offset = region.offs;
 	return 0;
 }
+
+/*****************************************************************************
+*
+* virtioConfigChange - configuration change interrupt handler
+*
+* RETURNS: N/A.
+*
+* ERRNO: N/A
+*
+*/
+
+void virtioConfigChange(const struct virtio_device* vdev)
+{
+	if (vdev == NULL) {
+		return;
+        }
+	return;
+}

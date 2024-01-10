@@ -300,6 +300,7 @@ extern void virtioDevInit(struct virtio_device* vdev);
 extern void virtioDevFree(struct virtio_device* vdev);
 extern size_t virtioRegionGet(int ctrl_fd, PHYS_ADDR addr, size_t size,
 			      uint32_t* offset);
+extern void virtioConfigChange(const struct virtio_device* vdev);
 #ifdef __cplusplus
 }
 #endif
