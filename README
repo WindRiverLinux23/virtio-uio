@@ -1,0 +1,92 @@
+wr-virtio-uio
+===============
+
+This layer provides support for building a Wind River Linux userspace VirtIO
+backend component suitable for use in the Wind River Helix Virtualization
+Platform.
+
+
+Maintenance
+-----------
+This layer is maintained by Wind River Systems, Inc.
+Contact <support@windriver.com> or your support representative for more
+information on submitting changes.
+
+
+Building with the wr-virtio-uio layer
+---------------------------------------
+
+This layer should be added to the bblayers.conf file. This is done
+automatically when using the Wind River configure wrapper.
+
+Always make sure that a Wind River Linux platform project is including
+this layer for it to be used. E.g. --with-layer=<path to>/wr-virtio-uio
+
+This layer comes with the following feature templates:
+
+ * feature/virtio-uio:
+   This feature adds the UIO kernel driver to the guest.
+
+ * feature/virtio-userspace:
+   This feature provides VirtIO userspace back-end driver.
+
+Here are the basic instructions for using the wr-virtio-uio layer:
+
+ 1. Create a Wind River Linux build environment:
+
+    ./wrlinux-x/setup.sh \
+        --machines xilinx-zynqmp \
+        --dl-layers --recipes pciutils --distro wrlinux \
+        --layers meta-virtualization --layers meta-mingw \
+        --template feature/docker,feature/posix_26,feature/xfce,feature/lxc
+
+    . environment-setup-x86_64-wrlinuxsdk-linux
+
+    . ./oe-init-build-env build-xilinx-zynqmp-initramfs
+
+ 2. Add the necessary layers.
+
+ 3. Add the wr-virtio-uio layer:
+
+    bitbake-layers add-layer {installDir}/VirtIO/wr-virtio-uio
+
+ 4. Configure the build:
+
+    Add the "virtio-uio virtio-userspace" to
+    PACKAGE_INSTALL:append:pn-wrlinux-image-initramfs parameter in the
+    conf/layers.conf. For example:
+    'PACKAGE_INSTALL:append:pn-wrlinux-image-initramfs += "gdb gdbserver tcf-agent vnic virtio-uio virtio-userspace packagegroup-core-tools-debug memstat safeipc"
+
+ 5. Add virtio-userspace service: (not yet implemented)
+
+    cp <installDir>/helix/guests/wrlinux-lts-23/classes_yyyymmdd/*.bbclass ../layers/local/classes
+
+    echo "USER_CLASSES += \" virtio-userspace\"" >> conf/local.conf
+
+ 6. Build:
+
+    export LANG=en_US.UTF-8
+
+    bitbake wrlinux-image-small
+
+ 7. Generate SDK (optional):
+
+    a. Linux SDK
+
+    bitbake -c populate_sdk wrlinux-image-small
+
+    b. Windows SDK:
+
+    SDKMACHINE=x86_64-mingw32 bitbake -c populate_sdk wrlinux-image-small
+
+License
+-------
+Copyright (C) 2017-2023 Wind River Systems, Inc.
+
+The right to copy, distribute or otherwise make use of this software may
+be licensed only pursuant to the terms of an applicable Wind River license
+agreement.  No license to Wind River intellectual property rights is granted
+herein.  All rights not licensed by Wind River are reserved by Wind River.
+
+Source code included in tree for individual recipes is under the LICENSE
+stated in each recipe (.bb file) unless other stated.

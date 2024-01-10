@@ -1,5 +1,5 @@
 #
-# Copyright (C) 2014 Wind River Systems, Inc.
+# Copyright (C) 2024 Wind River Systems, Inc.
 #
 
 DESCRIPTION      = "UGOS VirtIO UIO driver for HV 3.0"
