@@ -16,7 +16,7 @@
 
 #include "virtio_host_parser.h"
 #include "uio-virtio.h"
-#include "virtio_host_lib.h"
+#include "virtioHostLib.h"
 
 /* local macros */
 

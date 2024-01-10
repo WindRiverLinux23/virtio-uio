@@ -2,8 +2,9 @@
 
 SRCS = virtioUioTest.c \
        virtio_host_yaml_parser.c \
-       virtio_host_lib.c \
-       virtioVsmHost.c \
+       virtioHostLib.c \
+       virtioVsm.c \
+       virtioLib.c \
        virtioHostBlock.c
 
 BINARY = uio_test

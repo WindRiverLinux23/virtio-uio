@@ -22,11 +22,13 @@ SRC_URI = "file://Makefile \
            file://COPYING \
            file://uio_test.c \
            file://virtioUioTest.c \
-           file://virtio_host_lib.h \
-           file://virtio_host_lib.c \
+           file://virtioHostLib.h \
+           file://virtioHostLib.c \
            file://virtio_host_parser.h \
            file://virtio_host_yaml_parser.c \
-           file://virtioVsmHost.c \
+           file://virtioVsm.c \
+           file://virtioLib.c \
+           file://virtioLib.h \
            file://virtioHostBlock.c \
           "
 do_install() {

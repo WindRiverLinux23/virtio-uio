@@ -13,7 +13,7 @@
 #include <errno.h>
 #include <string.h>
 #include "virtio_host_parser.h"
-#include "virtio_host_lib.h"
+#include "virtioHostLib.h"
 
 /* defines */
 #define VIRTIO_HOST_YAML_DBG
@@ -780,6 +780,7 @@ static int virtioHostYamlParser(char *pBuf, size_t bufLen,
 			ret = -1;
 			goto exit;
 		}
+		pMaps[i]->refCnt = 0;
 
 		DBG_MSG(VIRTIO_HOST_YAML_DBG_INFO,
 			"Filling guest %d memory maps\n", i);
@@ -794,6 +795,7 @@ static int virtioHostYamlParser(char *pBuf, size_t bufLen,
 			pMaps[i]->entry[j].size   =
 				guestConfig.guests[i].maps[j].size;
 			pMaps[i]->entry[j].cpaddr = 0;
+			pMaps[i]->entry[j].offset = 0;
 
 			DBG_MSG(VIRTIO_HOST_YAML_DBG_INFO,
 				"%s: "				   \

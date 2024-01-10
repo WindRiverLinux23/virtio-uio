@@ -27,6 +27,7 @@ logic, such as configuration handling or queue handling.
 #include <unistd.h>
 #include <sys/queue.h>
 #include <sys/mman.h>
+#include <sched.h>
 #include <pthread.h>
 #include <errno.h>
 #include <string.h>
@@ -50,7 +51,8 @@ logic, such as configuration handling or queue handling.
 #define VIRTIO_HOST_DBG_INFO            0x00000020
 #define VIRTIO_HOST_DBG_ALL             0xffffffff
 
-static uint32_t virtioHostDbgMask = VIRTIO_HOST_DBG_ALL;
+static uint32_t virtioHostDbgMask = VIRTIO_HOST_DBG_ERR |
+	VIRTIO_HOST_DBG_IOREQ;
 
 #define VIRTIO_HOST_DBG_MSG(mask, fmt, ...)				\
 	do {								\
@@ -80,7 +82,7 @@ static int virtioHostReset(struct virtioHost *);
 static int virtioHostNotify(struct virtioHost *);
 static int virtioHostQueueEnable(struct virtioHost *, uint32_t);
 static int virtioHostSetStatus(struct virtioHost *, uint32_t);
-static int virtioHostMapSetup(int uio_fd, struct virtioMap *);
+static int virtioHostMapSetup(VIRTIO_VSM_ID, struct virtioMap *);
 
 /* locals */
 static TAILQ_HEAD(drvList, virtioHostDrvInfo) vHostCreateRtnList;
@@ -92,57 +94,6 @@ static DEFINE_MUTEX(vHostDeviceMapLock);
 static struct virtioHostVsm *pgVirtioHostVsm = NULL;
 static VIRTIO_HOST_CFG_PARSER *pVirtioHostParser = NULL;
 static VIRTIO_HOST_CFG_INFO virtioHostCfgInfo;
-
-uint16_t host_readw(uint16_t __iomem *addr)
-{
-	uint16_t val;
-
-	val = *addr;
-
-	return val;
-}
-
-uint32_t host_readl(uint32_t __iomem *addr)
-{
-	uint32_t val;
-
-	val = *addr;
-
-	return val;
-}
-
-uint64_t host_readq(uint64_t __iomem *addr)
-{
-	uint64_t val;
-
-	val = *addr;
-
-	return val;
-}
-
-void host_writew(uint16_t v, uint16_t __iomem *addr)
-{
-	*addr = v;
-}
-
-void host_writel(uint32_t v, uint32_t __iomem *addr)
-{
-	*addr = v;
-}
-
-void host_writeq(uint64_t v, uint64_t __iomem *addr)
-{
-	*addr = v;
-}
-
-void *zmalloc(size_t size)
-{
-	void* ptr = malloc(size);
-	if (ptr != 0) {
-		bzero(ptr, size);
-	}
-	return ptr;
-}
 
 /*******************************************************************************
 *
@@ -663,8 +614,9 @@ int virtioHostVsmReqKick(struct virtioHost *vHost, uint32_t queueId)
 {
 	uint32_t offset;
 	unsigned char *pavail;
-	__virtio16 *pidx;
-	__virtio16 idx;
+	volatile __virtio16 *pidx;
+	volatile __virtio16 idx;
+	int i;
 
 	if (!vHost || !vHost->pQueue || queueId >= vHost->queueMax) {
 		VIRTIO_HOST_DBG_MSG(VIRTIO_HOST_DBG_ERR,
@@ -673,22 +625,35 @@ int virtioHostVsmReqKick(struct virtioHost *vHost, uint32_t queueId)
 		return -1;
 	}
 
+	__mb();
+
 	offset = offsetof(struct vring_avail, idx);
 	pavail = (unsigned char *)vHost->pQueue[queueId].vRing.avail;
 	pidx = (unsigned short *)(pavail + offset);
-
-	idx = host_virtio16_to_cpu(vHost, host_readw(pidx));
-
 	VIRTIO_HOST_DBG_MSG(VIRTIO_HOST_DBG_INFO,
-			    "kick queue(%u) %u:%u\n",
+			    "addr: %p, offset: 0x%x, -> %p\n",
+			    pavail, offset, pidx);
+
+	/* FIXME: remove the cycle after the testing */
+	for (i = 0; i < 1000; i++) {
+		idx = host_virtio16_to_cpu(vHost, host_readw(pidx));
+		if (idx != vHost->pQueue[queueId].availIdx) {
+			break;
+		}
+		usleep(10);
+		__mb();
+	}
+
+	VIRTIO_HOST_DBG_MSG(VIRTIO_HOST_DBG_IOREQ,
+			    "kick queue(%u) %u:%u (%d)\n",
 			    queueId, vHost->pQueue[queueId].availIdx,
-			    idx);
+			    idx, i);
 
 	if (vHost->pQueue[queueId].availIdx != idx) {
-		VIRTIO_HOST_DBG_MSG(VIRTIO_HOST_DBG_INFO, "real kick\n");
+		VIRTIO_HOST_DBG_MSG(VIRTIO_HOST_DBG_IOREQ, "real kick\n");
 		vHost->pHostOps->kick(&vHost->pQueue[queueId]);
 	} else {
-		VIRTIO_HOST_DBG_MSG(VIRTIO_HOST_DBG_INFO, "fake kick\n");
+		VIRTIO_HOST_DBG_MSG(VIRTIO_HOST_DBG_IOREQ, "fake kick\n");
 	}
 
 	return 0;
@@ -1117,9 +1082,10 @@ int virtioHostCreate
 	vHost->pVsmOps   = &pgVirtioHostVsm->vsmOps;
 	vHost->pHostOps  = pHostOps;
 
-	if (virtioHostMapSetup(pgVirtioHostVsm->uio_fd, vHost->pMaps) != 0) {
+	if (virtioHostMapSetup(pgVirtioHostVsm->vsmId,
+			       vHost->pMaps) != 0) {
 		VIRTIO_HOST_DBG_MSG (VIRTIO_HOST_DBG_ERR,
-				"failed to get map\n");
+				     "failed to get map\n");
 		ret = ENOSPC;
 		goto failed;
 	}
@@ -1252,10 +1218,12 @@ void virtioHostRelease(struct virtioHost *vHost)
 * ERRNO: N/A
 */
 
-static int virtioHostMapSetup(int uio_fd, struct virtioMap *pMap)
+static int virtioHostMapSetup(VIRTIO_VSM_ID vsmId, struct virtioMap *pMap)
 {
 	uint32_t i;
 	int ret = 0;
+	int uio_fd;
+	int ctrl_fd;
 
 	if (!pMap) {
 		VIRTIO_HOST_DBG_MSG(VIRTIO_HOST_DBG_ERR,
@@ -1273,21 +1241,57 @@ static int virtioHostMapSetup(int uio_fd, struct virtioMap *pMap)
 		return 0;
 	}
 
+	ctrl_fd = virtioVsmGetCtrl(vsmId);
+	if (ctrl_fd < 0) {
+		VIRTIO_HOST_DBG_MSG (VIRTIO_HOST_DBG_ERR,
+				     "failed to get control file: %s\n",
+				     strerror(errno));
+		errno = ENOSPC;
+		return -1;
+	}
+	uio_fd = virtioVsmGetUIO(vsmId);
+	if (uio_fd < 0) {
+		VIRTIO_HOST_DBG_MSG (VIRTIO_HOST_DBG_ERR,
+				     "failed to get UIO file: %s\n",
+				     strerror(errno));
+		close(ctrl_fd);
+		errno = ENOSPC;
+		return -1;
+	}
+
 	/* map the host physcial to virtial space */
 	for (i = 0; i < pMap->count; i++) {
+		size_t align = getpagesize();
+		size_t alignedSize = (pMap->entry[i].size +
+				      align - 1) & ~(align -1);
 		VIRTIO_HOST_DBG_MSG(VIRTIO_HOST_DBG_INFO,
-				    "map %d hpaddr:0x%lx, 0x%lx\n",
+				    "map %d hpaddr:0x%lx, 0x%lx(0x%lx), "
+				    "offset: 0x%x\n",
 				    i, pMap->entry[i].hpaddr,
-				    pMap->entry[i].size);
-
-		pMap->entry[i].hvaddr = mmap(NULL, pMap->entry[i].size,
+				    pMap->entry[i].size, alignedSize,
+				    pMap->entry[i].offset);
+		ret = virtioRegionGet(ctrl_fd,
+				      pMap->entry[i].hpaddr,
+				      alignedSize,
+				      &pMap->entry[i].offset);
+		if (ret != 0) {
+			VIRTIO_HOST_DBG_MSG(VIRTIO_HOST_DBG_ERR,
+					    "failed to create region 0x%lx: %s\n",
+					    pMap->entry[i].hpaddr,
+					    strerror(errno));
+			errno = ENOSPC;
+			ret = -1;
+			break;
+		}
+		pMap->entry[i].hvaddr = mmap(NULL, alignedSize,
 					     PROT_READ | PROT_WRITE,
 					     MAP_SHARED, uio_fd,
 					     pMap->entry[i].offset);
 		if (pMap->entry[i].hvaddr == MAP_FAILED) {
 			VIRTIO_HOST_DBG_MSG(VIRTIO_HOST_DBG_ERR,
-					    "failed to map region 0x%lx\n",
-					    pMap->entry[i].hpaddr);
+					    "failed to map region 0x%lx: %s\n",
+					    pMap->entry[i].hpaddr,
+					    strerror(errno));
 			errno = ENOSPC;
 			ret = -1;
 			break;
@@ -1297,6 +1301,8 @@ static int virtioHostMapSetup(int uio_fd, struct virtioMap *pMap)
 				"entry:%d:0x%lx->%p\n", i,
 				pMap->entry[i].hpaddr, pMap->entry[i].hvaddr);
 	}
+	close(uio_fd);
+	close(ctrl_fd);
 
 	if (ret == 0) {
 		pMap->refCnt++;
@@ -1791,7 +1797,7 @@ int virtioHostQueueGetBuf(struct virtioHostQueue *pQueue,
 
 	uint32_t offset;
 	unsigned char *pa;
-	__virtio16 *pi;
+	volatile __virtio16 *pi;
 	__virtio16 *pr;
 	__virtio64 *paddr;
 	__virtio32 *plen;
@@ -1812,7 +1818,6 @@ int virtioHostQueueGetBuf(struct virtioHostQueue *pQueue,
 		return -1;
 	}
 
-	//VX_MEM_BARRIER_RW ();
 	__mb();
 
 	/* get the FE avail index */
@@ -1823,7 +1828,8 @@ int virtioHostQueueGetBuf(struct virtioHostQueue *pQueue,
 
 	if (pQueue->availIdx == availIdx) {
 		VIRTIO_HOST_DBG_MSG(VIRTIO_HOST_DBG_INFO,
-				    "pQueue->availIdx == availIdx\n");
+				    "pQueue->availIdx == availIdx %d\n",
+				    availIdx);
 		return 0;
 	}
 

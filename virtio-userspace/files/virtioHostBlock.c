@@ -36,7 +36,7 @@
 #endif
 #include <linux/fs.h>
 #include <linux/virtio_blk.h>
-#include "virtio_host_lib.h"
+#include "virtioHostLib.h"
 
 /* #define VIRTIO_BLK_PERF */
 #ifdef VIRTIO_BLK_PERF
@@ -321,11 +321,14 @@ static void virtioHostBlkSubmitBio(struct virtioBlkIoReq *pBlkReq)
 	struct virtioBlkHostDev *pBlkHostDev;
 	struct virtioHost *vhost;
 	struct iovec iov[BLOCK_IO_REQ_MAX];
-	int ret, len, i;
+	int ret = 0;
+	int len, i;
 #ifdef VIRTIO_BLK_MEM_DISK
 	uint64_t offset = 0;
 #endif
 
+	VIRTIO_BLK_DEV_DBG(VIRTIO_BLK_DEV_DBG_INFO,
+			   "start\n");
 	pBlkHostDev = (struct virtioBlkHostDev *)pBlkReq->blkHostCtx;
 	if (pBlkHostDev->beDevArgs.isFile) {
 		VIRTIO_BLK_DEV_DBG(VIRTIO_BLK_DEV_DBG_ERR,
@@ -394,6 +397,8 @@ static void virtioHostBlkSubmitBio(struct virtioBlkIoReq *pBlkReq)
 
 	virtioHostBlkDone(pBlkReq, vhost->pQueue, ret);
 
+	VIRTIO_BLK_DEV_DBG(VIRTIO_BLK_DEV_DBG_INFO,
+			   "done\n");
 	return;
 }
 

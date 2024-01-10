@@ -21,6 +21,7 @@ A program that tests VirtIO userspace subsystem
 #include <unistd.h>
 #include <fcntl.h>
 #include <poll.h>
+#include <semaphore.h>
 #include <sys/mman.h>
 #include <sys/ioctl.h>
 
@@ -32,6 +33,8 @@ A program that tests VirtIO userspace subsystem
 
 const char* virtio_ctrl_device = "/dev/virtio_ctrl";
 const char* uio_device = "/dev/uio0";
+
+extern int virtioHostEventHandler(struct virtio_device* vdev);
 
 static int virtioIntProcess(struct virtio_device* vdev, int uio_fd)
 {
@@ -48,31 +51,32 @@ static int virtioIntProcess(struct virtio_device* vdev, int uio_fd)
                 uio.fd = uio_fd;
                 uio.events = POLLIN;
 
-                if (write(uio_fd, &enable, sizeof(enable)) < 0) {
-			printf("Interrupt enable error: %s\n",
-			       strerror(errno));
-			break;
-		}
-
                 err = poll(&uio, 1, tv.tv_sec * 1000);
                 if (err == 0) {
-                        printf("Timeout\n");
-                        break;
+                        continue;
                 } else if (err < 0) {
                         printf("Error\n");
                         break;
                 } else {
-                        printf("Event: 0x%X ", uio.revents);
                         if (uio.revents & POLLIN) {
                                 err = read(uio_fd, &nints, sizeof(nints));
                                 if (err < 0) {
                                         printf("Read error %s\n",
                                                strerror(errno));
-                                } else {
-                                        printf("N interrupts: %d\n", nints);
+					continue;
                                 }
-                        }
+				err = virtioHostEventHandler(vdev);
+				if (err != 0) {
+					break;
+				}
+			}
                 }
+		/* Re-enable the interrupt */
+		if (write(uio_fd, &enable, sizeof(enable)) < 0) {
+			printf("Interrupt enable error: %s\n",
+			       strerror(errno));
+			break;
+		}
         }
 
 	enable = 0;
@@ -145,7 +149,7 @@ int main (void)
 	 */
 
 	virtioDevice.dev.base = addr;
-	if (virtvsm_init(&virtioDevice) != 0) {
+	if (vsm_init(&virtioDevice) != 0) {
 		printf("VSM initialization FAILED\n");
 		return -1;
 	}
@@ -154,7 +158,7 @@ int main (void)
         uio_fd = open(virtioDevice.uio_device, O_RDWR | O_SYNC);
 	virtioIntProcess(&virtioDevice, uio_fd);
 	close(uio_fd);
-	virtvsm_deinit(&virtioDevice);	
+	vsm_deinit(&virtioDevice);
 	printf("VirtIO test complete\n");
 	return 0;
 }
