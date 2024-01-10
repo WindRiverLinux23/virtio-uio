@@ -81,7 +81,10 @@ static int virtioctrl_add_region(struct virtio_region* region, int memtype)
         int err = 0;
         struct uio_device* idev = virtio_p_data.uio_dev;
 
-        /* Walk through the memory regions array and find the first free slot */
+        /*
+	 * Walk through the memory regions array and find if the region
+	 * with the same address exists, if not, we get the first free slot
+	 */
         for (i = 0;
              (i < MAX_UIO_MAPS) && (virtio_p_data.mem[i].size != 0);
              i++) {
@@ -91,6 +94,10 @@ static int virtioctrl_add_region(struct virtio_region* region, int memtype)
                 }
                 pr_info("Region: %d: 0x%LX, %Ld bytes\n",
                         i, virtio_p_data.mem[i].addr, virtio_p_data.mem[i].size);
+		if (virtio_p_data.mem[i].addr == region->addr) {
+			pr_info("Region matches 0x%Lx\n", region->addr);
+			break;
+		}
         }
         mem_avail_idx = i;
         if (mem_avail_idx >= MAX_UIO_MAPS) {
@@ -98,7 +105,16 @@ static int virtioctrl_add_region(struct virtio_region* region, int memtype)
                 return -EINVAL;
         }
 
-        /* Fill in the new memory region info */
+	/* Region found. Fill in the parameters */
+	if (virtio_p_data.mem[mem_avail_idx].size != 0) {
+		region->size = virtio_p_data.mem[mem_avail_idx].size;
+		region->offs = mem_avail_idx * PAGE_SIZE;
+		region->indx = mem_avail_idx;
+		return 0;
+	}
+
+	/* If region is not found, we add it */
+	/* Fill in the new memory region info */
         pr_info("Creating a new memory mapping at %d\n", mem_avail_idx);
 
         map = kzalloc(sizeof(*map), GFP_KERNEL);
@@ -114,7 +130,7 @@ static int virtioctrl_add_region(struct virtio_region* region, int memtype)
 			return -ENOMEM;
 		}
 		region->phys_addr = virt_to_phys((void*)region->addr);
-	} else if(memtype == UIO_MEM_PHYS) {
+	} else if(memtype == UIO_MEM_IOVA) {
 		region->phys_addr = region->addr;
 	}
 
@@ -188,7 +204,7 @@ long int virtioctrl_ioctl (struct file* dev,
                 if (copy_from_user(&region, regp, sizeof(region))) {
                         return -EFAULT;
                 }
-                error = virtioctrl_add_region(&region, UIO_MEM_PHYS);
+                error = virtioctrl_add_region(&region, UIO_MEM_IOVA);
                 if (error != 0) {
                         return error;
                 }
@@ -215,7 +231,7 @@ long int virtioctrl_ioctl (struct file* dev,
                         region.addr = virtio_p_data.mem[reg_index].addr;
                         region.size = virtio_p_data.mem[reg_index].size;
 			if (virtio_p_data.mem[reg_index].memtype ==
-			    UIO_MEM_PHYS) {
+			    UIO_MEM_IOVA) {
 				region.phys_addr = region.addr;
 			} else if (virtio_p_data.mem[reg_index].memtype ==
 				   UIO_MEM_LOGICAL) {
