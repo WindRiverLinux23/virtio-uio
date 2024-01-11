@@ -266,12 +266,6 @@ extern uint64_t host_virtio64_to_cpu(struct virtioHost *vHost, __virtio64 val);
 extern __virtio16 host_cpu_to_virtio16(struct virtioHost *vHost, uint16_t val);
 extern __virtio32 host_cpu_to_virtio32(struct virtioHost *vHost, uint32_t val);
 extern __virtio64 host_cpu_to_virtio64(struct virtioHost *vHost, uint64_t val);
-extern uint16_t host_readw(uint16_t __iomem *addr);
-extern uint32_t host_readl(uint32_t __iomem *addr);
-extern uint64_t host_readq(uint64_t __iomem *addr);
-extern void host_writew(uint16_t v, uint16_t __iomem *addr);
-extern void host_writel(uint32_t v, uint32_t __iomem *addr);
-extern void host_writeq(uint64_t v, uint64_t __iomem *addr);
 extern int virtioHostNeedReset(struct virtioHost *);
 extern int virtioHostTranslate(struct virtioHost*, PHYS_ADDR, VIRT_ADDR *);
 extern int virtioHostConfigNotify(struct virtioHost *);
@@ -292,6 +286,7 @@ extern int vsm_init(struct virtio_device *vdev);
 extern void vsm_deinit(struct virtio_device *vdev);
 extern int virtioVsmGetUIO(VIRTIO_VSM_ID pDrvCtrl);
 extern int virtioVsmGetCtrl(VIRTIO_VSM_ID pDrvCtrl);
+extern bool virtioVsmLegacyIsLittleEndian(VIRTIO_VSM_ID pDrvCtrl);
 
 static inline uint16_t __virtio16_to_cpu(bool little_endian, __virtio16 val)
 {

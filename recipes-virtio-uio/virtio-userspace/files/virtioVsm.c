@@ -43,7 +43,7 @@ only MMIO device is supported.
 #include <sys/queue.h>
 #include "virtioHostLib.h"
 
-#undef VIRTIO_VSM_DBG
+#define VIRTIO_VSM_DBG
 #ifdef VIRTIO_VSM_DBG
 
 #define VIRTIO_VSM_DBG_OFF             0x00000000
@@ -1428,7 +1428,6 @@ int virtioVsmGetUIO(VIRTIO_VSM_ID pDrvCtrl)
  */
 int virtioVsmGetCtrl(VIRTIO_VSM_ID pDrvCtrl)
 {
-	struct virtual_device* vdev;
 	int ctrl_fd;
 
 	if (pDrvCtrl == NULL || pDrvCtrl->vdev == NULL) {
@@ -1446,4 +1445,15 @@ int virtioVsmGetCtrl(VIRTIO_VSM_ID pDrvCtrl)
 		return -1;
 	}
 	return ctrl_fd;
+}
+
+bool virtioVsmLegacyIsLittleEndian(VIRTIO_VSM_ID pDrvCtrl)
+{
+	if (pDrvCtrl == NULL || pDrvCtrl->vdev == NULL) {
+		VIRTIO_VSM_DBG_MSG(
+			VIRTIO_VSM_DBG_ERR,
+			"invalid parameter\n");
+		return false;
+	}
+	return virtio_legacy_is_little_endian(pDrvCtrl->vdev);
 }

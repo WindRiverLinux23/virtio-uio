@@ -79,6 +79,7 @@ struct virtio_device_id {
 
 /**
  * struct virtio_device - representation of a device using virtio
+ * @queueList: internal list of virtqueues
  * @index: unique position on the virtio bus
  * @failed: saved value for VIRTIO_CONFIG_S_FAILED bit (for restore)
  * @config_enabled: configuration change reporting enabled
@@ -87,10 +88,12 @@ struct virtio_device_id {
  * @vqs_list_lock: protects @vqs.
  * @dev: underlying device.
  * @id: the device type identification (used to match it with a driver).
- * @config: the configuration ops for this device.
- * @vringh_config: configuration ops for host vrings.
- * @vqs: the list of virtqueues for this device.
  * @features: the features supported by both driver and device.
+ * @queues: virtqueue array
+ * @ringAddr: address of vrings associated with queues
+ * @nVqs: number of virtual queues in the device.
+ * @virtio_ctrl_device: name of the control device node
+ * @uio_device: name of the UIO device node
  * @priv: private pointer for the driver's use.
  */
 struct virtio_device {
@@ -109,7 +112,7 @@ struct virtio_device {
 	uint32_t nVqs;
 	const char* virtio_ctrl_device;
 	const char* uio_device;
-#if 0 //later
+#if 0 //TODO: later when we move MMIO specific functions to a separate entity
 	const struct virtio_config_ops *config;
 #endif
 
@@ -218,12 +221,13 @@ struct virtio_config_ops {
         int (*enable_vq_after_reset)(struct virtqueue *vq);
 };
 
-static inline bool virtio_legacy_is_little_endian(void)
+static inline bool virtio_legacy_is_little_endian(
+	const struct virtio_device* vdev)
 {
   #ifdef __LITTLE_ENDIAN
 	return true;
   #else
-	return false;
+	return (virtioHasFeatures(vdev, VIRTIO_F_VERSION_1) == 0UL);
   #endif
 }
 
@@ -301,6 +305,8 @@ extern void virtioDevFree(struct virtio_device* vdev);
 extern size_t virtioRegionGet(int ctrl_fd, PHYS_ADDR addr, size_t size,
 			      uint32_t* offset);
 extern void virtioConfigChange(const struct virtio_device* vdev);
+extern uint64_t virtioHasFeatures(const struct virtio_device* vdev,
+				  uint64_t feature);
 #ifdef __cplusplus
 }
 #endif

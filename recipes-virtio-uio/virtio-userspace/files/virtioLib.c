@@ -100,7 +100,7 @@ static bool virtioNeedConvert(const struct virtio_device * vdev)
 #ifdef __LITTLE_ENDIAN__
         return false;
 #else
-        return virtio_legacy_is_little_endian();
+        return virtio_legacy_is_little_endian(vdev);
 #endif
 }
 
@@ -1096,6 +1096,24 @@ const volatile struct vring* virtqueue_get_vring(struct virtqueue *vq)
  * VirtIO device functions
  */
 
+static int virtioDevGetFeatures(struct virtio_device* vdev)
+{
+	uint32_t featHi, featLo;
+	if (vdev == NULL) {
+		VIRTIO_LIB_DBG_MSG(VIRTIO_LIB_DBG_ERR,
+				   "invalid argument\n");
+		return -1;
+	}
+	/* High part */
+	virtio_write(vdev, VIRTIO_MMIO_DEVICE_FEATURES_SEL, 1);
+	featHi = virtio_read(vdev, VIRTIO_MMIO_DEVICE_FEATURES);
+	virtio_write(vdev, VIRTIO_MMIO_DEVICE_FEATURES_SEL, 0);
+	featLo = virtio_read(vdev, VIRTIO_MMIO_DEVICE_FEATURES);
+
+	vdev->features = ((uint64_t)featHi) << 32 | featLo;
+	return 0;
+}
+
 /**
  * Initialize VirtIO device internal structures
  * @vdev: virtual device pointer
@@ -1105,6 +1123,7 @@ void virtioDevInit(struct virtio_device* vdev)
 	TAILQ_INIT(&vdev->queueList);
 	pthread_mutex_init(&vdev->config_lock, NULL);
 	pthread_mutex_init(&vdev->vqs_list_lock, NULL);
+	virtioDevGetFeatures(vdev);
 }
 
 /**

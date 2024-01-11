@@ -635,7 +635,7 @@ int virtioHostVsmReqKick(struct virtioHost *vHost, uint32_t queueId)
 			    pavail, offset, pidx);
 
 	/* FIXME: remove the cycle after the testing */
-	for (i = 0; i < 1000; i++) {
+	for (i = 0; i < 200; i++) {
 		idx = host_virtio16_to_cpu(vHost, host_readw(pidx));
 		if (idx != vHost->pQueue[queueId].availIdx) {
 			break;
@@ -1356,38 +1356,44 @@ uint64_t vritioHostHasFeature(struct virtioHost *vHost, uint64_t feature)
 
 uint16_t host_virtio16_to_cpu(struct virtioHost *vHost, __virtio16 val)
 {
-	return __virtio16_to_cpu(vritioHostHasFeature(vHost, VIRTIO_F_VERSION_1) ||
-		virtio_legacy_is_little_endian(), val);
+	return __virtio16_to_cpu(
+		vritioHostHasFeature(vHost, VIRTIO_F_VERSION_1) ||
+		virtioVsmLegacyIsLittleEndian(pgVirtioHostVsm->vsmId), val);
 }
 
 uint32_t host_virtio32_to_cpu(struct virtioHost *vHost, __virtio32 val)
 {
-	return __virtio32_to_cpu(vritioHostHasFeature(vHost, VIRTIO_F_VERSION_1) ||
-		virtio_legacy_is_little_endian(), val);
+	return __virtio32_to_cpu(
+		vritioHostHasFeature(vHost, VIRTIO_F_VERSION_1) ||
+		virtioVsmLegacyIsLittleEndian(pgVirtioHostVsm->vsmId), val);
 }
 
 uint64_t host_virtio64_to_cpu(struct virtioHost *vHost, __virtio64 val)
 {
-	return __virtio64_to_cpu(vritioHostHasFeature(vHost, VIRTIO_F_VERSION_1) ||
-		virtio_legacy_is_little_endian(), val);
+	return __virtio64_to_cpu(
+		vritioHostHasFeature(vHost, VIRTIO_F_VERSION_1) ||
+		virtioVsmLegacyIsLittleEndian(pgVirtioHostVsm->vsmId), val);
 }
 
 __virtio16 host_cpu_to_virtio16(struct virtioHost *vHost, uint16_t val)
 {
-	return __cpu_to_virtio16(vritioHostHasFeature(vHost, VIRTIO_F_VERSION_1) ||
-		virtio_legacy_is_little_endian(), val);
+	return __cpu_to_virtio16(
+		vritioHostHasFeature(vHost, VIRTIO_F_VERSION_1) ||
+		virtioVsmLegacyIsLittleEndian(pgVirtioHostVsm->vsmId), val);
 }
 
 __virtio32 host_cpu_to_virtio32(struct virtioHost *vHost, uint32_t val)
 {
-	return __cpu_to_virtio32(vritioHostHasFeature(vHost, VIRTIO_F_VERSION_1) ||
-		virtio_legacy_is_little_endian(), val);
+	return __cpu_to_virtio32(
+		vritioHostHasFeature(vHost, VIRTIO_F_VERSION_1) ||
+		virtioVsmLegacyIsLittleEndian(pgVirtioHostVsm->vsmId), val);
 }
 
 __virtio64 host_cpu_to_virtio64(struct virtioHost *vHost, uint64_t val)
 {
-	return __cpu_to_virtio64(vritioHostHasFeature(vHost, VIRTIO_F_VERSION_1) ||
-		virtio_legacy_is_little_endian(), val);
+	return __cpu_to_virtio64(
+		vritioHostHasFeature(vHost, VIRTIO_F_VERSION_1) ||
+		virtioVsmLegacyIsLittleEndian(pgVirtioHostVsm->vsmId), val);
 }
 
 
