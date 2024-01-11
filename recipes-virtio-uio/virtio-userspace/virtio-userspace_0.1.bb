@@ -20,7 +20,6 @@ DEPENDS = "virtio-uio libyaml openssl"
 
 SRC_URI = "file://Makefile \
            file://COPYING \
-           file://uio_test.c \
            file://virtioUioTest.c \
            file://virtioHostLib.h \
            file://virtioHostLib.c \
