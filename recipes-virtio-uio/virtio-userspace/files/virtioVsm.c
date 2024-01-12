@@ -1341,6 +1341,7 @@ void vsm_deinit(struct virtio_device *vdev)
 
 	/* TODO: implement the device reset */
 	//vdev->config->reset(vdev);
+	virtioDevReset(vdev);
 
 	/*
 	 * TODO: Replaced until the MMIO specific code moves to a separate entity

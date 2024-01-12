@@ -307,6 +307,7 @@ extern size_t virtioRegionGet(int ctrl_fd, PHYS_ADDR addr, size_t size,
 extern void virtioConfigChange(const struct virtio_device* vdev);
 extern uint64_t virtioHasFeatures(const struct virtio_device* vdev,
 				  uint64_t feature);
+void virtioDevReset(struct virtio_device* vdev);
 #ifdef __cplusplus
 }
 #endif

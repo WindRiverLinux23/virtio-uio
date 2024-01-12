@@ -1194,15 +1194,14 @@ size_t virtioRegionGet(int ctrl_fd, PHYS_ADDR addr, size_t size,
 	return 0;
 }
 
-/*****************************************************************************
-*
-* virtioConfigChange - configuration change interrupt handler
-*
-* RETURNS: N/A.
-*
-* ERRNO: N/A
-*
-*/
+/**
+ * VirtIO device configuration change interrupt handler
+ * @vdev: virtual device pointer
+ *
+ * @return N/A
+ * @errno: N/A
+ *
+ */
 
 void virtioConfigChange(const struct virtio_device* vdev)
 {
@@ -1210,4 +1209,15 @@ void virtioConfigChange(const struct virtio_device* vdev)
 		return;
         }
 	return;
+}
+
+/**
+ * Reset VirtIO device
+ * @vdev: virtual device pointer
+ *
+ * @return N/A
+ */
+void virtioDevReset(struct virtio_device* vdev)
+{
+	virtioSetStatus(vdev, 0);
 }

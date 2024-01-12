@@ -62,7 +62,14 @@ static int virtioIntProcess(struct virtio_device* vdev, int uio_fd)
         virtio_add_status(vdev, VIRTIO_CONFIG_S_DRIVER_OK);
 
 	while (is_running) {
-                uio.fd = uio_fd;
+		/* Eenable the interrupt */
+		if (write(uio_fd, &enable, sizeof(enable)) < 0) {
+			printf("Interrupt enable error: %s\n",
+			       strerror(errno));
+			break;
+		}
+
+		uio.fd = uio_fd;
                 uio.events = POLLIN;
 
                 err = poll(&uio, 1, tv.tv_sec * 1000);
@@ -85,12 +92,6 @@ static int virtioIntProcess(struct virtio_device* vdev, int uio_fd)
 				}
 			}
                 }
-		/* Re-enable the interrupt */
-		if (write(uio_fd, &enable, sizeof(enable)) < 0) {
-			printf("Interrupt enable error: %s\n",
-			       strerror(errno));
-			break;
-		}
         }
 
 	enable = 0;
