@@ -1281,8 +1281,10 @@ failed:
 			if (pVsmQueue->req)
 				free(pVsmQueue->req);
 
-			if (pVsmQueue->req_thread)
+			if (pVsmQueue->req_thread &&
+			    pthread_cancel(pVsmQueue->req_thread) == 0) {
 				pthread_join(pVsmQueue->req_thread, NULL);
+			}
 		}
 
 		if (pDrvCtrl->pIrq)
@@ -1291,11 +1293,15 @@ failed:
 		if (pDrvCtrl->pVirtqueueInfo)
 			free(pDrvCtrl->pVirtqueueInfo);
 
-		if (pDrvCtrl->comp_thread)
+		if (pDrvCtrl->comp_thread &&
+		    pthread_cancel(pDrvCtrl->comp_thread) == 0) {
 			pthread_join(pDrvCtrl->comp_thread, NULL);
+		}
 
-		if (pDrvCtrl->irq_thread)
+		if (pDrvCtrl->irq_thread &&
+		    pthread_cancel(pDrvCtrl->irq_thread) == 0) {
 			pthread_join(pDrvCtrl->irq_thread, NULL);
+		}
 
 		if (pDrvCtrl->pQueue)
 			free(pDrvCtrl->pQueue);
@@ -1332,14 +1338,33 @@ void vsm_deinit(struct virtio_device *vdev)
 	}
 
 	/* Destroy virtqueue */
+
+	/* TODO: implement the device reset */
 	//vdev->config->reset(vdev);
+
+	/*
+	 * TODO: Replaced until the MMIO specific code moves to a separate entity
+	 */
 	//vdev->config->del_vqs(vdev);
 	virtioDevFree(vdev);
 
 	for (queueId = 0; queueId < pDrvCtrl->reqQueueNum; queueId++) {
 		if (pDrvCtrl->pVsmQueue[queueId].req)
 			free(pDrvCtrl->pVsmQueue[queueId].req);
-		pthread_join(pDrvCtrl->pVsmQueue[queueId].req_thread, NULL);
+		VIRTIO_VSM_DBG_MSG(VIRTIO_VSM_DBG_INFO,
+				   "queue %d thread cancel ->",
+				   queueId);
+		ret = pthread_cancel(pDrvCtrl->pVsmQueue[queueId].req_thread);
+		if (ret == 0) {
+			pthread_join(pDrvCtrl->pVsmQueue[queueId].req_thread,
+				     NULL);
+			VIRTIO_VSM_DBG_MSG(VIRTIO_VSM_DBG_INFO,
+					   "done\n");
+		} else {
+			VIRTIO_VSM_DBG_MSG(VIRTIO_VSM_DBG_INFO,
+					   "error: %s\n",
+					   strerror(errno));
+		}
 	}
 
 	if (pDrvCtrl->pVirtqueueInfo)
@@ -1348,11 +1373,35 @@ void vsm_deinit(struct virtio_device *vdev)
 	if (pDrvCtrl->pIrq)
 		free(pDrvCtrl->pIrq);
 
-	if (pDrvCtrl->comp_thread)
-		pthread_join(pDrvCtrl->comp_thread, NULL);
+	if (pDrvCtrl->comp_thread) {
+		VIRTIO_VSM_DBG_MSG(VIRTIO_VSM_DBG_INFO,
+				   "comp thread cancel ->");
+		ret = pthread_cancel(pDrvCtrl->comp_thread);
+		if (ret == 0) {
+			pthread_join(pDrvCtrl->comp_thread, NULL);
+			VIRTIO_VSM_DBG_MSG(VIRTIO_VSM_DBG_INFO,
+					   "done\n");
+		} else {
+			VIRTIO_VSM_DBG_MSG(VIRTIO_VSM_DBG_ERR,
+					   "error: %s\n",
+					   strerror(errno));
+		}
+	}
 
-	if (pDrvCtrl->irq_thread)
-		pthread_join(pDrvCtrl->irq_thread, NULL);
+	if (pDrvCtrl->irq_thread) {
+		VIRTIO_VSM_DBG_MSG(VIRTIO_VSM_DBG_INFO,
+				   "irq thread cancel ->");
+		ret = pthread_cancel(pDrvCtrl->irq_thread);
+		if (ret == 0) {
+			pthread_join(pDrvCtrl->irq_thread, NULL);
+			VIRTIO_VSM_DBG_MSG(VIRTIO_VSM_DBG_INFO,
+					   "done\n");
+		} else {
+			VIRTIO_VSM_DBG_MSG(VIRTIO_VSM_DBG_INFO,
+					   "error: %s\n",
+					   strerror(errno));
+		}
+	}
 
 	free(pDrvCtrl);
 

@@ -10,6 +10,7 @@
 
 #include <stdint.h>
 #include <stdlib.h>
+#include <unistd.h>
 #include <errno.h>
 #include <string.h>
 #include "virtio_host_parser.h"
@@ -737,7 +738,7 @@ static int virtioHostYamlParser(char *pBuf, size_t bufLen,
 	DBG_MSG(VIRTIO_HOST_YAML_DBG_INFO, "\n%s\n", pBuf);
 
 	len = guestConfig.guests_count * sizeof (struct virtioMap *);
-	pMaps = malloc(len);
+	pMaps = zmalloc(len);
 	if (!pMaps) {
 		DBG_MSG(VIRTIO_HOST_YAML_DBG_ERR,
 			"allocate memory for pMap failed!\n");
@@ -757,9 +758,8 @@ static int virtioHostYamlParser(char *pBuf, size_t bufLen,
 		len = sizeof(struct virtioMap) +
 			mapNum * sizeof(struct virtio_map_entry);
 
-		pMaps[i] = (struct virtioMap *)malloc(len);
-		if (pMaps[i] == NULL)
-		{
+		pMaps[i] = (struct virtioMap *)zmalloc(len);
+		if (pMaps[i] == NULL) {
 			DBG_MSG(VIRTIO_HOST_YAML_DBG_ERR,
 				"Melory allocation failed!\n");
 			ret = -1;
@@ -888,7 +888,7 @@ static int virtioHostYamlParser(char *pBuf, size_t bufLen,
 
 	DBG_MSG(VIRTIO_HOST_YAML_DBG_INFO, "Parsing complete\n");
 	pHostCfgInfo->pMaps  = pMaps;
-	pHostCfgInfo->mapNum = mapNum;
+	pHostCfgInfo->mapNum = guestConfig.guests_count;
 	pHostCfgInfo->devNum = devNum;
 	pHostCfgInfo->pVirtioHostDev = pVirtioHostDev;
 
@@ -897,14 +897,14 @@ exit:
 
 	if (ret != 0) {
 		if (pMaps) {
-			for (i = 0; i < mapNum; i++) {
+			for (i = 0; i < guestConfig.guests_count; i++) {
 				if (pMaps[i])
 					free(pMaps[i]);
 			}
 			free(pMaps);
 		}
 
-		if (pHostCfgInfo->pVirtioHostDev)
+		if (pVirtioHostDev)
 			free(pVirtioHostDev);
 	}
 
@@ -951,7 +951,6 @@ static void virtioHostYamlFreeDevMaps(struct virtioMap **ppMaps,
 			free(ppMaps[i]);
 		}
 	free(ppMaps);
-
 	return;
 }
 

@@ -52,7 +52,7 @@ logic, such as configuration handling or queue handling.
 #define VIRTIO_HOST_DBG_ALL             0xffffffff
 
 static uint32_t virtioHostDbgMask = VIRTIO_HOST_DBG_ERR |
-	VIRTIO_HOST_DBG_IOREQ;
+	VIRTIO_HOST_DBG_IOREQ | VIRTIO_HOST_DBG_INFO;
 
 #define VIRTIO_HOST_DBG_MSG(mask, fmt, ...)				\
 	do {								\
@@ -93,7 +93,11 @@ static DEFINE_MUTEX(vHostDeviceMapLock);
 
 static struct virtioHostVsm *pgVirtioHostVsm = NULL;
 static VIRTIO_HOST_CFG_PARSER *pVirtioHostParser = NULL;
-static VIRTIO_HOST_CFG_INFO virtioHostCfgInfo;
+static VIRTIO_HOST_CFG_INFO virtioHostCfgInfo = {
+	.pVirtioHostDev = NULL,
+	.pMaps = NULL,
+	.mapNum = 0
+};
 
 /*******************************************************************************
 *
@@ -190,6 +194,7 @@ static int virtioHostCfgParse(char *pBuf, size_t bufLen,
 
 int virtioHostCfgFree(void)
 {
+	VIRTIO_HOST_DBG_MSG(VIRTIO_HOST_DBG_INFO, "start\n");
 	if (!pVirtioHostParser || !pVirtioHostParser->freeDevCfgsFn ||
 			!pVirtioHostParser->freeDevMapsFn) {
 		VIRTIO_HOST_DBG_MSG(VIRTIO_HOST_DBG_ERR,
@@ -201,6 +206,10 @@ int virtioHostCfgFree(void)
 	pVirtioHostParser->freeDevCfgsFn(virtioHostCfgInfo.pVirtioHostDev);
 	pVirtioHostParser->freeDevMapsFn(virtioHostCfgInfo.pMaps,
 					 virtioHostCfgInfo.mapNum);
+	virtioHostCfgInfo.pVirtioHostDev = NULL;
+	virtioHostCfgInfo.pMaps = NULL;
+	virtioHostCfgInfo.mapNum = 0;
+	VIRTIO_HOST_DBG_MSG(VIRTIO_HOST_DBG_INFO, "done\n");
 	return 0;
 }
 

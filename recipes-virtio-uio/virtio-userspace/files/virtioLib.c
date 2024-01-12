@@ -1144,7 +1144,7 @@ void virtioDevFree(struct virtio_device* vdev)
 		}
 		if (vdev->queues[i] != NULL) {
 			virtqueueDeinitIndirect(vdev->queues[i]);
-				free(vdev->queues[i]);
+			free(vdev->queues[i]);
 		}
 	}
 	vdev->nVqs = 0;

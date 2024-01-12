@@ -270,9 +270,10 @@ void virtioHostBlkDrvRelease(void)
 				blkdev_put(pBlkHostDev->bdev, FMODE_READ | FMODE_WRITE);
 #endif
 
-		if (pBlkHostCtx)
-			if (pBlkHostCtx->work_thread)
-				pthread_join(pBlkHostCtx->work_thread, NULL);
+		if (pBlkHostCtx && pBlkHostCtx->work_thread &&
+		    pthread_cancel(pBlkHostCtx->work_thread) == 0) {
+			pthread_join(pBlkHostCtx->work_thread, NULL);
+		}
 
 		virtioHostRelease(&pBlkHostCtx->vhost);
 

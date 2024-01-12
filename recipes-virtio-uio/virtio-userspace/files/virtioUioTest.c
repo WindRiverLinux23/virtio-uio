@@ -21,6 +21,7 @@ A program that tests VirtIO userspace subsystem
 #include <unistd.h>
 #include <fcntl.h>
 #include <poll.h>
+#include <signal.h>
 #include <semaphore.h>
 #include <sys/mman.h>
 #include <sys/ioctl.h>
@@ -34,7 +35,16 @@ A program that tests VirtIO userspace subsystem
 const char* virtio_ctrl_device = "/dev/virtio_ctrl";
 const char* uio_device = "/dev/uio0";
 
+/* This flag controls termination of the main loop. */
+volatile sig_atomic_t is_running;
+
 extern int virtioHostEventHandler(struct virtio_device* vdev);
+
+static void signal_handler(int signo)
+{
+	is_running = 0;
+	signal(signo, signal_handler);
+}
 
 static int virtioIntProcess(struct virtio_device* vdev, int uio_fd)
 {
@@ -44,10 +54,14 @@ static int virtioIntProcess(struct virtio_device* vdev, int uio_fd)
 	struct timeval tv = { 5, 0 };
 	int err;
 
+	is_running = 1;
+	signal(SIGINT, signal_handler);
+	signal(SIGTERM, signal_handler);
+
 	/* Tell the remote device, we're ready */
         virtio_add_status(vdev, VIRTIO_CONFIG_S_DRIVER_OK);
 
-	while (1) {
+	while (is_running) {
                 uio.fd = uio_fd;
                 uio.events = POLLIN;
 
