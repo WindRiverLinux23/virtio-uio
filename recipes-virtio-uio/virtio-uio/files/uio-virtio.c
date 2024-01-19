@@ -75,7 +75,7 @@ module_param(irq, int, S_IRUGO);
 static int virtioctrl_add_region(struct virtio_region* region, int memtype)
 {
         int i;
-        const struct kobj_type* ktype = NULL;
+        struct kobj_type* ktype = NULL;
         int mem_avail_idx; /* index of the next memory region available */
         struct uio_map *map; /* new memory mapping */
         int err = 0;
@@ -160,22 +160,22 @@ error:
         return 0;
 }
 
-static int virtioctrl_open (struct inode *, struct file *)
+static int virtioctrl_open (struct inode *my_inode, struct file *my_file)
 {
         return 0;
 }
 
-static int virtioctrl_release (struct inode *, struct file *)
+static int virtioctrl_release (struct inode *my_inode, struct file *my_file)
 {
         return 0;
 }
 
-ssize_t virtioctrl_read (struct file* filep, char *, size_t, loff_t *)
+ssize_t virtioctrl_read (struct file* filep, char *my_str, size_t my_size, loff_t *my_loff)
 {
         return 0;
 }
 
-ssize_t virtioctrl_write (struct file *, const char *, size_t, loff_t *)
+ssize_t virtioctrl_write (struct file *filep, const char *my_str, size_t my_size, loff_t *my_loff)
 {
         return 0;
 }
@@ -213,40 +213,42 @@ long int virtioctrl_ioctl (struct file* dev,
                 }
                 break;
         case VHOST_VIRTIO_GET_REGION:
-                uint32_t regsize;
-                uint32_t reg_index;
+                {
+                    uint32_t regsize;
+                    uint32_t reg_index;
 
-                if (copy_from_user(&region, regp, sizeof(region))) {
-                        return -EFAULT;
-                }
-                reg_index = region.indx;
-                if (reg_index >= MAX_UIO_MAPS) {
-                        return -EINVAL;
-                }
+                    if (copy_from_user(&region, regp, sizeof(region))) {
+                            return -EFAULT;
+                    }
+                    reg_index = region.indx;
+                    if (reg_index >= MAX_UIO_MAPS) {
+                            return -EINVAL;
+                    }
 
-                mutex_lock(&virtio_p_data.uio_dev->info_lock);
-                regsize = virtio_p_data.mem[reg_index].size;
-                if (regsize > 0) {
-                        region.offs = reg_index * PAGE_SIZE;
-                        region.addr = virtio_p_data.mem[reg_index].addr;
-                        region.size = virtio_p_data.mem[reg_index].size;
-			if (virtio_p_data.mem[reg_index].memtype ==
-			    UIO_MEM_IOVA) {
-				region.phys_addr = region.addr;
-			} else if (virtio_p_data.mem[reg_index].memtype ==
-				   UIO_MEM_LOGICAL) {
-				region.phys_addr =
-					virt_to_phys((void*)region.addr);
-			}
+                    mutex_lock(&virtio_p_data.uio_dev->info_lock);
+                    regsize = virtio_p_data.mem[reg_index].size;
+                    if (regsize > 0) {
+                            region.offs = reg_index * PAGE_SIZE;
+                            region.addr = virtio_p_data.mem[reg_index].addr;
+                            region.size = virtio_p_data.mem[reg_index].size;
+                            if (virtio_p_data.mem[reg_index].memtype ==
+                                UIO_MEM_IOVA) {
+                                    region.phys_addr = region.addr;
+                            } else if (virtio_p_data.mem[reg_index].memtype ==
+                                    UIO_MEM_LOGICAL) {
+                                    region.phys_addr =
+                                            virt_to_phys((void*)region.addr);
+                            }
+                    }
+                    mutex_unlock(&virtio_p_data.uio_dev->info_lock);
+                    if (regsize == 0) {
+                            return -ENOMEM;
+                    }
+                    if (copy_to_user(regp, &region, sizeof(region))) {
+                            return -EFAULT;
+                    }
+                    break;
                 }
-                mutex_unlock(&virtio_p_data.uio_dev->info_lock);
-                if (regsize == 0) {
-                        return -ENOMEM;
-                }
-                if (copy_to_user(regp, &region, sizeof(region))) {
-                        return -EFAULT;
-                }
-                break;
         default:
                 return -ENOIOCTLCMD;
         }
