@@ -43,7 +43,7 @@ only MMIO device is supported.
 #include <sys/queue.h>
 #include "virtioHostLib.h"
 
-#define VIRTIO_VSM_DBG
+#undef VIRTIO_VSM_DBG
 #ifdef VIRTIO_VSM_DBG
 
 #define VIRTIO_VSM_DBG_OFF             0x00000000
@@ -63,6 +63,7 @@ static uint32_t virtioVsmDbgMask = VIRTIO_VSM_DBG_ERR | VIRTIO_VSM_DBG_INFO;
                     ((mask) == VIRTIO_VSM_DBG_ERR)) {                   \
                         printf("%d: %s() " fmt, __LINE__, __func__,     \
                                ##__VA_ARGS__);                          \
+			fflush(stdout);					\
                 }                                                       \
         }                                                               \
 while ((false));
@@ -327,7 +328,7 @@ again:
 			pIrq = virtqueueGetBuffer(pIrqQueue, &len, &token);
 			if (!pIrq) {
 
-				VIRTIO_VSM_DBG_MSG(VIRTIO_VSM_DBG_INFO,
+				VIRTIO_VSM_DBG_MSG(VIRTIO_VSM_DBG_IOREQ,
 						"enable interrupt\n");
 
 				atomic_store(&pDrvCtrl->pVsmQueue[VIRTIO_VSM_IRQ_QUEUE].int_pending, false);
@@ -424,7 +425,7 @@ static void virtioVsmQueueDone(struct virtqueue *pQueue)
 
 	/* returning true means original value equals to the expected */
 	if (atomic_compare_exchange_strong(pending, &old, true) == true) {
-		VIRTIO_VSM_DBG_MSG(VIRTIO_VSM_DBG_INFO,
+		VIRTIO_VSM_DBG_MSG(VIRTIO_VSM_DBG_IOREQ,
 				"disable interrupt\n");
 		pthread_mutex_lock(lock);
 		virtqueueIntrDisable(pQueue);
@@ -492,7 +493,6 @@ again:
 					   "start\n");
 			pReq = virtqueueGetBuffer(pReqQueue, &len, &token);
 			if (!pReq) {
-
 				VIRTIO_VSM_DBG_MSG(VIRTIO_VSM_DBG_IOREQ,
 						"enable interrupt\n");
 
@@ -519,7 +519,8 @@ again:
 				VIRTIO_VSM_DBG_MSG(VIRTIO_VSM_DBG_INFO,
 						   "read request\n");
 
-				if (virtioHostVsmReqRead(vHost, pReq->address, pReq->size, &value) == 0) {
+				if (virtioHostVsmReqRead(vHost, pReq->address,
+							 pReq->size, &value) == 0) {
 					pReq->value = value;
 					pReq->status = VIRTIO_VSM_S_OK;
 				} else
@@ -528,10 +529,13 @@ again:
 				VIRTIO_VSM_DBG_MSG(VIRTIO_VSM_DBG_INFO,
 						"write request\n");
 
-				if (virtioHostVsmReqWrite(vHost, pReq->address, pReq->size, pReq->value) == 0)
+				if (virtioHostVsmReqWrite(
+					    vHost, pReq->address, pReq->size,
+					    pReq->value) == 0) {
 					pReq->status = VIRTIO_VSM_S_OK;
-				else
+				} else {
 					pReq->status = VIRTIO_VSM_S_IOERR;
+				}
 			} else if (pReq->type == VIRTIO_VSM_T_NOTIFY) {
 				VIRTIO_VSM_DBG_MSG(VIRTIO_VSM_DBG_INFO,
 						"notify request\n");
@@ -1004,8 +1008,8 @@ static int init_vq(struct virtioVsm *pDrvCtrl)
 	return 0;
 }
 
-extern void virtio_host_net_init(void);
-extern void virtio_host_net_terminate(void);
+extern void virtioHostNetDrvInit(void);
+extern void virtioHostNetDrvRelease(void);
 extern void virtioHostBlkDrvInit(uint32_t mountTimeout);
 extern void virtioHostBlkDrvRelease(void);
 extern void virtioHostConsoleDrvInit(uint32_t buf_size);
@@ -1259,7 +1263,7 @@ int vsm_init(struct virtio_device *vdev)
 	virtioHostInit();
 
 	/* Init host net driver */
-	//virtio_host_net_init();
+	virtioHostNetDrvInit();
 
 	/* Init host block driver */
 	virtioHostBlkDrvInit(10);
@@ -1329,7 +1333,7 @@ void vsm_deinit(struct virtio_device *vdev)
 	virtioHostBlkDrvRelease();
 
 	/* Release host net driver */
-	//virtio_host_net_terminate();
+	virtioHostNetDrvRelease();
 
 	pDrvCtrl = vdev->priv;
 	if (!pDrvCtrl) {
@@ -1435,7 +1439,7 @@ int virtioHostEventHandler(struct virtio_device* vdev)
 	}
 	if ((status & VIRTIO_MMIO_INT_VRING) != 0U) {
 		VIRTIO_VSM_DBG_MSG(VIRTIO_VSM_DBG_INFO,
-				   "interrupt\n");
+				   "vring interrupt\n");
 		for (queueId = 0; queueId < pDrvCtrl->queueNum; queueId++) {
 			VIRTIO_VSM_DBG_MSG(VIRTIO_VSM_DBG_INFO,
 					   "queue %d\n", queueId);

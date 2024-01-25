@@ -5,7 +5,8 @@ SRCS = virtioUioTest.c \
        virtioHostLib.c \
        virtioVsm.c \
        virtioLib.c \
-       virtioHostBlock.c
+       virtioHostBlock.c \
+       virtioHostNet.c
 
 BINARY = uio_test
 
