@@ -78,17 +78,6 @@ extern "C" {
 
 #define VIRTIO_MMIO_MAGIC_VALUE_LE 0x74726976 /* virt */
 
-/* driver status code */
-
-#define VIRTIO_STATUS_RESET       0x00u
-#define VIRTIO_STATUS_ACK         0x01u
-#define VIRTIO_STATUS_DRIVER      0x02u
-#define VIRTIO_STATUS_FEATURES_OK 0x08u
-#define VIRTIO_STATUS_DRIVER_OK   0x04u
-#define VIRTIO_STATUS_NEEDS_RESET 0x40u
-#define VIRTIO_STATUS_FAILED      0x80u
-
-
 struct virtioVsm;
 struct virtioHost;
 struct virioChannel;

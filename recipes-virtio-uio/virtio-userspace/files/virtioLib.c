@@ -37,7 +37,7 @@ This is the virtio library that provides basic VirtIO functions
 #define VIRTIO_LIB_DBG_INFO            0x00000020
 #define VIRTIO_LIB_DBG_ALL             0xffffffff
 
-static uint32_t virtiolIBDbgMask = VIRTIO_LIB_DBG_ERR | VIRTIO_LIB_DBG_INFO;
+static uint32_t virtiolIBDbgMask = VIRTIO_LIB_DBG_ERR;
 
 #define VIRTIO_LIB_DBG_MSG(mask, fmt, ...)                              \
         do {                                                            \
@@ -45,6 +45,7 @@ static uint32_t virtiolIBDbgMask = VIRTIO_LIB_DBG_ERR | VIRTIO_LIB_DBG_INFO;
                     ((mask) == VIRTIO_LIB_DBG_ERR)) {                   \
                         printf("%d: %s() " fmt, __LINE__, __func__,     \
                                ##__VA_ARGS__);                          \
+			fflush(stdout);					\
                 }                                                       \
         }                                                               \
 while ((false));
@@ -282,14 +283,15 @@ void virtqueueIntrDisable(struct virtqueue* pQueue)
 		if (virtioHasFeatures(pQueue->vdev,
 				      VIRTIO_F_RING_EVENT_IDX) != 0UL) {
 			vring_used_event(&pQueue->vRing) =
-				cpu_to_virtio16 (pQueue->vdev,
-						 pQueue->usedIdx - 1U);
+				cpu_to_virtio16(pQueue->vdev,
+						pQueue->usedIdx - 1U);
 		} else {
 			pQueue->vRing.avail->flags =
-				cpu_to_virtio16 (pQueue->vdev,
-						 pQueue->availFlagShadow);
+				cpu_to_virtio16(pQueue->vdev,
+						pQueue->availFlagShadow);
 		}
 	}
+	__mb();
 	return;
 }
 

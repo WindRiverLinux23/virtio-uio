@@ -39,7 +39,7 @@ logic, such as configuration handling or queue handling.
 /* defines */
 #define VIRTIO_STATUS_RESET       0x00u //zhe not defined in linux?
 
-#define VIRTIO_HOST_DBG
+#undef VIRTIO_HOST_DBG
 #ifdef VIRTIO_HOST_DBG
 
 #define VIRTIO_HOST_DBG_OFF             0x00000000
@@ -52,7 +52,7 @@ logic, such as configuration handling or queue handling.
 #define VIRTIO_HOST_DBG_ALL             0xffffffff
 
 static uint32_t virtioHostDbgMask = VIRTIO_HOST_DBG_ERR |
-	VIRTIO_HOST_DBG_IOREQ | VIRTIO_HOST_DBG_INFO;
+	VIRTIO_HOST_DBG_QUEUE | VIRTIO_HOST_DBG_INFO;
 
 #define VIRTIO_HOST_DBG_MSG(mask, fmt, ...)				\
 	do {								\
@@ -60,6 +60,7 @@ static uint32_t virtioHostDbgMask = VIRTIO_HOST_DBG_ERR |
 		    ((mask) == VIRTIO_HOST_DBG_ALL)) {			\
 			printf("%d: %s() " fmt, __LINE__, __func__,	\
 			       ##__VA_ARGS__);				\
+			fflush(stdout);					\
 		}							\
 	}								\
 while ((false));
@@ -1566,7 +1567,7 @@ int virtioHostTranslate(struct virtioHost *vHost,
 
 /*******************************************************************************
 *
-* virtioHostQueueNotify - notify queue buffer updated to virtio device
+* virtioHostNotify - notify queue buffer updated to virtio device
 *
 * This routine sets the used buffer notification bit of the virtio device
 * interrupt status register and pushes a request to the VSM IRQ queue to
@@ -1858,7 +1859,7 @@ int virtioHostQueueGetBuf(struct virtioHostQueue *pQueue,
 			    pQueue->availIdx - 1, descIdx);
 
 	/* update the avail event idx */
-	if (!(pQueue->usedFlagShadow & VRING_USED_F_NO_NOTIFY)) {
+	if ((pQueue->usedFlagShadow & VRING_USED_F_NO_NOTIFY) == 0) {
 		vring_avail_event(&pQueue->vRing) =
 			host_cpu_to_virtio16(pQueue->vHost, pQueue->availIdx);
 	}
@@ -1909,8 +1910,12 @@ int virtioHostQueueGetBuf(struct virtioHostQueue *pQueue,
 			bufList[idx].flags = (uint16_t)host_virtio16_to_cpu(
 				pQueue->vHost, host_readw(pflags));
 
-			if (++idx == maxBuf)
+			if (++idx == maxBuf) {
+				VIRTIO_HOST_DBG_MSG(
+					VIRTIO_HOST_DBG_INFO,
+					"reached maxBuf\n");
 				break;
+			}
 
 		} else if (!vritioHostHasFeature(pQueue->vHost,
 						 VIRTIO_RING_F_INDIRECT_DESC)) {
@@ -2032,8 +2037,9 @@ int virtioHostQueueGetBuf(struct virtioHostQueue *pQueue,
 			}
 		}
 
-		if ((host_readw(pflags) & VRING_DESC_F_NEXT) == 0)
+		if ((host_readw(pflags) & VRING_DESC_F_NEXT) == 0) {
 			break;
+		}
 
 		if (idx == maxBuf) {
 			VIRTIO_HOST_DBG_MSG(VIRTIO_HOST_DBG_ERR,
@@ -2186,6 +2192,7 @@ int virtioHostQueueNotify(struct virtioHostQueue *pQueue)
 	struct virtioHost *vHost;
 	uint16_t flags;
 	uint16_t old, new;
+	volatile uint16_t eventIdx;
 	bool needKick = false;
 	int ret = 0;
 
@@ -2229,10 +2236,12 @@ int virtioHostQueueNotify(struct virtioHostQueue *pQueue)
 		new = pQueue->lastUsedIdx =
 			(uint16_t)host_virtio16_to_cpu(
 				pQueue->vHost, pQueue->vRing.used->idx);
-		if (vring_need_event(vring_used_event(&pQueue->vRing),
-				     new, old)) {
-			VIRTIO_HOST_DBG_MSG(VIRTIO_HOST_DBG_INFO, "2 %u:%u\n",
-					    old, new);
+		eventIdx = vring_used_event(&pQueue->vRing);
+		VIRTIO_HOST_DBG_MSG(
+			VIRTIO_HOST_DBG_INFO,
+			"eventIdx = %u, old= %u, new = %u\n",
+			eventIdx, old, new);
+		if (vring_need_event(eventIdx, new, old)) {
 			needKick = true;
 		}
 	} else {
@@ -2247,6 +2256,7 @@ int virtioHostQueueNotify(struct virtioHostQueue *pQueue)
 	}
 
 	if (needKick) {
+		VIRTIO_HOST_DBG_MSG(VIRTIO_HOST_DBG_INFO, "kick\n");
 		__mb();
 		ret = virtioHostNotify(vHost);
 	}
@@ -2307,9 +2317,9 @@ int virtioHostQueueIntrEnable(struct virtioHostQueue *pQueue)
 		pQueue->vRing.used->flags = host_cpu_to_virtio16(
 			pQueue->vHost, pQueue->usedFlagShadow);
 
-		__mb();
 	}
 
+	__mb();
 	return 0;
 }
 
