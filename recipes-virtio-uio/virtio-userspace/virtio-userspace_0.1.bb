@@ -16,7 +16,7 @@ PR = "r0"
 PV = "0.1"
 S  = "${WORKDIR}"
 
-DEPENDS = "virtio-uio libyaml openssl"
+DEPENDS = "virtio-uio libyaml openssl liburing"
 
 SRC_URI = "file://Makefile \
            file://COPYING \
@@ -30,6 +30,9 @@ SRC_URI = "file://Makefile \
            file://virtioLib.h \
            file://virtioHostBlock.c \
            file://virtioHostNet.c \
+           file://virtioHostConsole.c \
+           file://mevent.c \
+           file://mevent.h \
           "
 do_install() {
   install -d ${D}${bindir}

@@ -1269,7 +1269,7 @@ int vsm_init(struct virtio_device *vdev)
 	virtioHostBlkDrvInit(10);
 
 	/* Init host console driver */
-	//virtioHostConsoleDrvInit(4096);
+	virtioHostConsoleDrvInit(4096);
 
 	/* Init host lib */
 	virtioHostDevicesInit();
@@ -1327,7 +1327,7 @@ void vsm_deinit(struct virtio_device *vdev)
 	VIRTIO_VSM_DBG_MSG(VIRTIO_VSM_DBG_INFO, "start\n");
 
 	/* Release host console driver */
-	//virtioHostConsoleDrvRelease();
+	virtioHostConsoleDrvRelease();
 
 	/* Release host block driver */
 	virtioHostBlkDrvRelease();

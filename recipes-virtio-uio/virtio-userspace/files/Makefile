@@ -6,12 +6,14 @@ SRCS = virtioUioTest.c \
        virtioVsm.c \
        virtioLib.c \
        virtioHostBlock.c \
-       virtioHostNet.c
+       virtioHostNet.c \
+       mevent.c \
+       virtioHostConsole.c
 
 BINARY = uio_test
 
 OBJS = $(SRCS:.c=.o)
-LIBS = -lyaml -lssl -lcrypto
+LIBS = -lyaml -lssl -lcrypto -luring
 
 .c.o:
 	$(CC) $(CFLAGS) -c -o $@ $<
