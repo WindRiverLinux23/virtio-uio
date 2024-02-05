@@ -43,6 +43,7 @@
 		const typeof( ((type *)0)->member ) *__mptr = (ptr); \
 		(type *)( (char *)__mptr - offsetof(type,member) );})
 
+#undef VIRTIO_CONSOLE_DEV_DUMP_PACKETS
 #define VIRTIO_CONSOLE_DEV_DBG_ON
 #ifdef VIRTIO_CONSOLE_DEV_DBG_ON
 
@@ -53,7 +54,7 @@
 #define VIRTIO_CONSOLE_DEV_DBG_INFO            0x00000200
 #define VIRTIO_CONSOLE_DEV_DBG_ALL             0xffffffff
 
-static uint32_t virtioConsoleDevDbgMask = VIRTIO_CONSOLE_DEV_DBG_ALL;
+static uint32_t virtioConsoleDevDbgMask =  VIRTIO_CONSOLE_DEV_DBG_ERR;
 
 #undef VIRTIO_CONSOLE_DEV_DBG
 #define VIRTIO_CONSOLE_DEV_DBG(mask, fmt, ...)				\
@@ -773,19 +774,26 @@ void virtioHostConsoleDrvRelease(void)
 		if (!pConsoleHostDev)
 			continue;
 
-		virtioConsoleTeardownBackend((struct virtioConsoleBackend *)pConsolePort->arg);
 
 		pConsoleHostCtx = (struct virtioConsoleHostCtx *)pConsoleHostDev;
 		for (queue = 0; queue < pConsoleHostCtx->queues; queue++) {
 			pConsolePort = &pConsoleHostCtx->ports[queue];
-			if (pConsolePort->tx_thread)
+			virtioConsoleTeardownBackend(
+			    (struct virtioConsoleBackend *)pConsolePort->arg);
+			if (pConsolePort->tx_thread &&
+			    pthread_cancel(pConsolePort->tx_thread) == 0) {
 				pthread_join(pConsolePort->tx_thread, NULL);
+			}
 		}
 
-		if (pConsoleHostCtx->controlPort.tx_thread)
+		if (pConsoleHostCtx->controlPort.tx_thread &&
+		    pthread_cancel(pConsoleHostCtx->controlPort.tx_thread) == 0) {
 			pthread_join(pConsoleHostCtx->controlPort.tx_thread, NULL);
+		}
 
-		pthread_join(virtioHostMeventDispatchThread, NULL);
+		if (pthread_cancel(virtioHostMeventDispatchThread) == 0) {
+			pthread_join(virtioHostMeventDispatchThread, NULL);
+		}
 
 		virtioHostRelease(&pConsoleHostCtx->vhost);
 
@@ -929,7 +937,7 @@ static int virtioHostConsoleDevCreate(struct virtioHostDev *pHostDev,
 		VIRTIO_CONSOLE_DEV_DBG(VIRTIO_CONSOLE_DEV_DBG_ERR, "no port\n");
 		goto err;
 	} else if (pConsoleBeDevArgs->nports == 1) {
-		pConsoleBeDevArgs->queues = 2;
+		pConsoleBeDevArgs->queues = 4;
 		pConsoleBeDevArgs->multiport = false;
 	} else {
 		pConsoleBeDevArgs->queues = (pConsoleBeDevArgs->nports * 2) + 2;
@@ -1317,11 +1325,11 @@ static void virtioHostConsoleReqHandleRx(struct virtioConsolePort *pConsolePort)
 		/* any other errors */
 		goto close;
 	}
-
+#ifdef VIRTIO_CONSOLE_DEV_DUMP_PACKETS
 	for (i = 0; i < 8; i++)
 		printf("%02x ", *((char *)bufList[0].buf + i));
 	printf("len: %d\n", len);
-
+#endif
 	virtioHostConsoleDone(idx, pQueue, len);
 	return;
 close:
@@ -1446,11 +1454,11 @@ static void* virtioHostConsoleReqHandleTx(void *arg)
 				virtioConsoleResetBackend(be);
 				break;
 			}
-
+#ifdef VIRTIO_CONSOLE_DEV_DUMP_PACKETS
 			for (i = 0; i < 8; i++)
 				printf("%02x ", *((char *)bufList[0].buf + i));
 			printf("len: %d\n", ret);
-
+#endif
 			virtioHostConsoleDone(idx, pQueue, ret);
 		}
 	}
