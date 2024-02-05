@@ -860,7 +860,7 @@ static void virtioHostNetAbort(struct virtioHostQueue *pQueue, uint16_t idx)
  * ERRNO: N/A
  */
 
-static void* virtioHostNetReqDispatch(void *)
+static void* virtioHostNetReqDispatch(void *my_unused)
 {
 	struct virtioNetHostCtx *pNetHostCtx;
 	struct virtioDispObj *pDispObj;

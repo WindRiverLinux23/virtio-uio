@@ -1195,7 +1195,7 @@ static void virtioHostBlkAbort(struct virtioHostQueue *pQueue, uint16_t idx)
  * ERRNO: N/A
  */
 
-static void* virtioHostBlkReqDispatch(void *)
+static void* virtioHostBlkReqDispatch(void *my_unused)
 {
 	struct virtioBlkHostCtx *pBlkHostCtx;
 	struct virtioDispObj *pDispObj;

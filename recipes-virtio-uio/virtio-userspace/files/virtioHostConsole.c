@@ -214,7 +214,7 @@ static struct termios virtio_console_saved_tio;
 static int virtio_console_saved_flags;
 
 pthread_t virtioHostMeventDispatchThread;
-void* virtioHostMeventDispatch(void *)
+void* virtioHostMeventDispatch(void *my_unused)
 {
 	mevent_init();
 	mevent_dispatch();
@@ -1176,7 +1176,7 @@ static void virtioHostConsoleAbort(struct virtioHostQueue *pQueue, uint16_t idx)
  * ERRNO: N/A
  */
 
-static void* virtioHostConsoleReqDispatch(void *)
+static void* virtioHostConsoleReqDispatch(void *my_unused)
 {
 	struct virtioConsoleHostCtx *pConsoleHostCtx;
 	struct virtioDispObj *pDispObj;
