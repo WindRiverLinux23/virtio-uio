@@ -58,10 +58,10 @@ static uint32_t virtioConsoleDevDbgMask = VIRTIO_CONSOLE_DEV_DBG_ALL;
 #undef VIRTIO_CONSOLE_DEV_DBG
 #define VIRTIO_CONSOLE_DEV_DBG(mask, fmt, ...)				\
 	do {								\
-		if ((virtioConsoleDevDbgMask & (mask)) ||		\
+		if ((virtioConsoleDevDbgMask & (mask)) ||			\
 		    ((mask) == VIRTIO_CONSOLE_DEV_DBG_ALL)) {		\
 			printf("%d: %s() " fmt, __LINE__, __func__,	\
-			       ##__VA_ARGS__);fflush(stdout);		\
+			       ##__VA_ARGS__);				\
 		}							\
 	}								\
 while ((false))
@@ -111,8 +111,6 @@ struct virtioConsolePort {
 	int			rxq;
 	int			txq;
 	void			*arg;
-	pthread_t		rx_thread;
-	sem_t			rx_sem;
 	pthread_t		tx_thread;
 	sem_t			tx_sem;
 };
@@ -153,7 +151,6 @@ struct virtioConsoleHostDev {
 		bool multiport;            /* multi port         */
 		uint32_t nports;           /* number of ports    */
 		uint32_t queues;           /* number of queues   */
-		uint32_t buf_size;         /* buffer size        */
 		struct virtioChannel channel[1];
 		struct virtioConsoleBePortArgs ports[VIRTIO_CONSOLE_MAXPORTS];
 	} beDevArgs;
@@ -177,7 +174,6 @@ static struct virtioConsoleHostDrv {
 	pthread_mutex_t dispMtx;
 	pthread_cond_t dispCond;
 	struct virtioDispObj dispObj[VIRTIO_CONSOLE_DISP_OBJ_MAX];
-	uint32_t buf_size;
 } vConsoleHostDrv;
 
 static int virtioHostConsoleReset(struct virtioHost *);
@@ -194,7 +190,7 @@ static void virtioConsoleBackendRead(int fd __attribute__((unused)),
 			    void *arg);
 static void virtioConsoleRestoreStdio(void);
 static void* virtioHostConsoleReqDispatch(void *);
-static void* virtioHostConsoleReqHandleRx(void *arg);
+static void virtioHostConsoleReqHandleRx(struct virtioConsolePort *pConsolePort);
 static void* virtioHostConsoleReqHandleTx(void *arg);
 static void* virtioHostConsoleReqHandleControlTx(void *arg);
 
@@ -219,6 +215,7 @@ static int virtio_console_saved_flags;
 pthread_t virtioHostMeventDispatchThread;
 void* virtioHostMeventDispatch(void *)
 {
+	mevent_init();
 	mevent_dispatch();
 }
 
@@ -232,15 +229,10 @@ void* virtioHostMeventDispatch(void *)
  *
  * ERRNO: N/A
  */
-void virtioHostConsoleDrvInit(uint32_t buf_size)
+void virtioHostConsoleDrvInit(void)
 {
 	int ret, i;
 
-	if (mevent_init() != 0) {
-		VIRTIO_CONSOLE_DEV_DBG(VIRTIO_CONSOLE_DEV_DBG_ERR,
-				       "mevent library init failure\n");
-		return;
-	}
 	virtioHostDrvRegister((struct virtioHostDrvInfo *)&HostDrvInfo);
 
 	pthread_mutex_init(&vConsoleHostDrv.drvMtx, NULL);
@@ -259,8 +251,6 @@ void virtioHostConsoleDrvInit(uint32_t buf_size)
 				"failed to create virtio console host dispatch thread\n");
 	}
 
-	vConsoleHostDrv.buf_size = buf_size;
-
 	ret = pthread_create(&virtioHostMeventDispatchThread, NULL,
 			virtioHostMeventDispatch, NULL);
 	if (ret) {
@@ -276,10 +266,10 @@ static int virtioConsoleOpenBackend(const char *path, enum virtioConsoleBeType b
 	switch (be_type) {
 		case VIRTIO_CONSOLE_BE_PTY:
 			fd = posix_openpt(O_RDWR | O_NOCTTY);
-			if (fd == -1)
+			if (fd == -1) {
 				VIRTIO_CONSOLE_DEV_DBG(VIRTIO_CONSOLE_DEV_DBG_ERR,
 						"posix_openpt failed, errno = %d\n", errno);
-			else if (grantpt(fd) == -1 || unlockpt(fd) == -1) {
+			} else if (grantpt(fd) == -1 || unlockpt(fd) == -1) {
 				VIRTIO_CONSOLE_DEV_DBG(VIRTIO_CONSOLE_DEV_DBG_ERR,
 						"grant/unlock failed, errno = %d\n", errno);
 				close(fd);
@@ -471,27 +461,27 @@ static int virtioConsoleConfigBackend(struct virtioConsoleBackend *be)
 
 static struct virtioConsolePort* virtioConsoleAddPort(
 			struct virtioConsoleHostCtx *pConsoleHostCtx,			
-			const char *name, void *arg, bool is_console)
+			const char *name, void *arg, bool is_console, uint32_t portId)
 {
-	struct virtioConsolePort *port = &pConsoleHostCtx->ports[pConsoleHostCtx->nports];
+	struct virtioConsolePort *port = &pConsoleHostCtx->ports[portId];
 
-	port->id = pConsoleHostCtx->nports;
+	port->id = portId;
 	port->pConsoleHostDev = (struct virtioConsoleHostDev *)pConsoleHostCtx;
 	port->name = name;
 	port->arg = arg;
 	port->is_console = is_console;
 
-	/* Doesn't receiveq start from 0 and transmitq start from 1 according to virtio v1.2? */
+	/* receiveq start from 0 and transmitq start from 1 according to virtio v1.2 */
 	if (port->id == 0) {
-		port->txq = 0;
-		port->rxq = 1;
+		port->rxq = 0;
+		port->txq = 1;
 	} else {
 		/* 
-                 * port->id here starts from 1, txq from 4, rxq from 5.
-		 * So as to skip control queue whose txq is 2 and rxq is 3.
+                 * port->id here starts from 1, rxq from 4, txq from 5.
+		 * So as to skip control queue whose rxq is 2 and txq is 3.
                  */
-		port->txq = pConsoleHostCtx->nports * 2;
-		port->rxq = port->txq + 1;
+		port->rxq = (port->id + 1) * 2;
+		port->txq = port->rxq + 1;
 	}
 
 	port->enabled = true;
@@ -572,18 +562,18 @@ static void virtioConsoleBackendRead(int fd __attribute__((unused)),
 	struct virtioConsoleBackend *be = arg;
 	static char dummybuf[2048];
 
+	VIRTIO_CONSOLE_DEV_DBG(VIRTIO_CONSOLE_DEV_DBG_INFO, "start\n");
+
 	port = be->port;
 
 	if (!be->open || !port->rx_ready) {
 		ret = read(be->fd, dummybuf, sizeof(dummybuf));
+		VIRTIO_CONSOLE_DEV_DBG(VIRTIO_CONSOLE_DEV_DBG_INFO,
+				"backend rx is not ready, drop it.\n");
 		return;
 	}
 
-	ret = sem_post(&port->rx_sem);
-	if (ret)
-		VIRTIO_CONSOLE_DEV_DBG(VIRTIO_CONSOLE_DEV_DBG_ERR,
-				"failed to sem_post rx_sem: %s\n",
-				strerror(errno));
+	virtioHostConsoleReqHandleRx(port);
 
 	return;
 }
@@ -643,6 +633,8 @@ static void virtioConsoleTeardownBackend(void *param)
 	struct virtioConsoleHostDev *pConsoleHostDev = NULL;
 	struct virtioConsoleBackend *be;
 
+	VIRTIO_CONSOLE_DEV_DBG(VIRTIO_CONSOLE_DEV_DBG_INFO, "start\n");
+
 	be = (struct virtioConsoleBackend *)param;
 	if (!be)
 		return;
@@ -672,17 +664,15 @@ static void virtioConsoleTeardownBackend(void *param)
  *
  * ERRNO: N/A
  */
-static int virtioHostConsoleBeDevCreate(struct virtioConsoleHostDev *pConsoleHostDev)
+static int virtioHostConsoleBeDevCreate(struct virtioConsoleHostDev *pConsoleHostDev, uint32_t portId)
 {
-	struct virtioConsolePort *pConsolePort;
 	struct virtioConsoleHostCtx *pConsoleHostCtx;
 	struct virtioConsoleBePortArgs *pConsoleBePortArgs;
 	struct virtioConsoleBackend *be;
 	int fd = -1, ret;
 
 	pConsoleHostCtx = &pConsoleHostDev->consoleHostCtx;
-	pConsolePort = &pConsoleHostCtx->ports[pConsoleHostDev->beDevArgs.nports];
-	pConsoleBePortArgs = &pConsoleHostDev->beDevArgs.ports[pConsoleHostDev->beDevArgs.nports];
+	pConsoleBePortArgs = &pConsoleHostDev->beDevArgs.ports[portId];
 
 	fd = virtioConsoleOpenBackend(pConsoleBePortArgs->path,
 			pConsoleBePortArgs->be_type);
@@ -712,7 +702,7 @@ static int virtioHostConsoleBeDevCreate(struct virtioConsoleHostDev *pConsoleHos
 	}
 
 	be->port = virtioConsoleAddPort(pConsoleHostCtx, pConsoleBePortArgs->name,
-			be, pConsoleBePortArgs->is_console);
+			be, pConsoleBePortArgs->is_console, portId);
 	if (be->port == NULL) {
 		VIRTIO_CONSOLE_DEV_DBG(VIRTIO_CONSOLE_DEV_DBG_ERR,
 				"virtio_console_add_port failed\n");
@@ -748,24 +738,8 @@ static int virtioHostConsoleBeDevCreate(struct virtioConsoleHostDev *pConsoleHos
 	virtioConsoleOpenPort(be->port, true);
 	be->open = true;
 
-	/* set device features */
-	pConsoleHostCtx->feature = (1UL << VIRTIO_F_VERSION_1) |
-		(1UL << VIRTIO_CONSOLE_F_SIZE) |
-		(1UL << VIRTIO_CONSOLE_F_EMERG_WRITE) |
-		(1UL << VIRTIO_RING_F_EVENT_IDX) |
-		(1UL << VIRTIO_RING_F_INDIRECT_DESC);
-
-	if (pConsoleHostDev->beDevArgs.multiport)
-		pConsoleHostCtx->feature |= (1UL << VIRTIO_CONSOLE_F_MULTIPORT);
-
-	VIRTIO_CONSOLE_DEV_DBG(VIRTIO_CONSOLE_DEV_DBG_INFO,
-			"pConsoleHostCtx->feature:0x%lx\n",
-			pConsoleHostCtx->feature);
-
 	return 0;
-
 err:
-
 	if (be) {
 		if (be->port) {
 			be->port->enabled = false;
@@ -804,30 +778,19 @@ void virtioHostConsoleDrvRelease(void)
 		pConsoleHostCtx = (struct virtioConsoleHostCtx *)pConsoleHostDev;
 		for (queue = 0; queue < pConsoleHostCtx->queues; queue++) {
 			pConsolePort = &pConsoleHostCtx->ports[queue];
-			if (pConsolePort->tx_thread &&
-			    pthread_cancel(pConsolePort->tx_thread) == 0) {
+			if (pConsolePort->tx_thread)
 				pthread_join(pConsolePort->tx_thread, NULL);
-			}
-			if (pConsolePort->rx_thread &&
-			    pthread_cancel(pConsolePort->rx_thread) == 0) {
-				pthread_join(pConsolePort->rx_thread, NULL);
-			}
 		}
 
-		if (pConsoleHostCtx->controlPort.tx_thread &&
-		    pthread_cancel(pConsoleHostCtx->controlPort.tx_thread) == 0) {
+		if (pConsoleHostCtx->controlPort.tx_thread)
 			pthread_join(pConsoleHostCtx->controlPort.tx_thread, NULL);
-		}
 
-		if (pthread_cancel(virtioHostMeventDispatchThread) == 0) {
-			pthread_join(virtioHostMeventDispatchThread, NULL);
-		}
+		pthread_join(virtioHostMeventDispatchThread, NULL);
 
 		virtioHostRelease(&pConsoleHostCtx->vhost);
 
 		free(pConsoleHostDev);
 	}
-	mevent_deinit();
 }
 
 /*******************************************************************************
@@ -865,14 +828,13 @@ static int virtioHostConsoleDevCreate(struct virtioHostDev *pHostDev,
 	opts = pHostDev->args;
 	pConsoleBeDevArgs->nports = 0; 
 	pConsoleBeDevArgs->multiport = false;
-	pConsoleBeDevArgs->buf_size = 0;
 
+	/* port parsing */
 	while ((opt = strsep(&opts, ",")) != NULL) {
-		/* port parsing */
 		if (pConsoleBeDevArgs->nports == VIRTIO_CONSOLE_MAXPORTS) {
 			VIRTIO_CONSOLE_DEV_DBG(VIRTIO_CONSOLE_DEV_DBG_ERR,
 					"too many device, support up to %d\n", VIRTIO_CONSOLE_MAXPORTS);
-			return -EINVAL;
+			goto err;
 		}
 
 		pConsoleBePortArgs = &pConsoleBeDevArgs->ports[pConsoleBeDevArgs->nports];
@@ -881,7 +843,7 @@ static int virtioHostConsoleDevCreate(struct virtioHostDev *pHostDev,
 		if (!backend) {
 			VIRTIO_CONSOLE_DEV_DBG(VIRTIO_CONSOLE_DEV_DBG_ERR,
 					"no backend\n");
-			return -EINVAL;
+			goto err;
 		}
 
 		if (backend[0] == '@') {
@@ -897,7 +859,7 @@ static int virtioHostConsoleDevCreate(struct virtioHostDev *pHostDev,
 		if (i == VIRTIO_CONSOLE_BE_MAX) {
 			VIRTIO_CONSOLE_DEV_DBG(VIRTIO_CONSOLE_DEV_DBG_ERR,
 					"unknown type\n");
-			return -EINVAL;
+			goto err;
 		}
 
 		pConsoleBePortArgs->be_type = i;
@@ -910,7 +872,7 @@ static int virtioHostConsoleDevCreate(struct virtioHostDev *pHostDev,
 				} else {
 					VIRTIO_CONSOLE_DEV_DBG(VIRTIO_CONSOLE_DEV_DBG_ERR,
 							"no socket name\n");
-					return -EINVAL;
+					goto err;
 				}
 
 				p = strsep(&opt, ":");
@@ -919,7 +881,7 @@ static int virtioHostConsoleDevCreate(struct virtioHostDev *pHostDev,
 				} else {
 					VIRTIO_CONSOLE_DEV_DBG(VIRTIO_CONSOLE_DEV_DBG_ERR,
 							"no socket path\n");
-					return -EINVAL;
+					goto err;
 				}
 
 				if (opt) {
@@ -937,8 +899,12 @@ static int virtioHostConsoleDevCreate(struct virtioHostDev *pHostDev,
 				} else {
 					VIRTIO_CONSOLE_DEV_DBG(VIRTIO_CONSOLE_DEV_DBG_ERR,
 							"no socket type\n");
-					return -EINVAL;
+					goto err;
 				}
+			} else if (pConsoleBePortArgs->be_type == VIRTIO_CONSOLE_BE_STDIO ||
+					pConsoleBePortArgs->be_type == VIRTIO_CONSOLE_BE_PTY) {
+				/* stdio and pty don't need port path */
+				pConsoleBePortArgs->path[0] = '\0';
 			} else {
 				p = strsep(&opt, "=");
 				if (opt) {
@@ -946,41 +912,14 @@ static int virtioHostConsoleDevCreate(struct virtioHostDev *pHostDev,
 				} else {
 					VIRTIO_CONSOLE_DEV_DBG(VIRTIO_CONSOLE_DEV_DBG_ERR,
 							"no port path\n");
-					return -EINVAL;
+					goto err;
 				}
 			}
 		} else {
 			VIRTIO_CONSOLE_DEV_DBG(VIRTIO_CONSOLE_DEV_DBG_ERR,
 					"no port name\n");
-			return -EINVAL;
-		}
-
-		/* port initialization */
-		ret = virtioHostConsoleBeDevCreate(pConsoleHostDev);
-		if (ret)
-			goto err;
-
-		pConsolePort = &pConsoleHostCtx->ports[pConsoleBeDevArgs->nports];
-
-		ret = pthread_create(&pConsolePort->rx_thread, NULL,
-				virtioHostConsoleReqHandleRx, pConsolePort);
-		if (ret) {
-			VIRTIO_CONSOLE_DEV_DBG(VIRTIO_CONSOLE_DEV_DBG_ERR,
-					"failed to create rx thread(%d)\n", ret);
 			goto err;
 		}
-
-		sem_init(&pConsolePort->rx_sem, 0, 0);
-
-		ret = pthread_create(&pConsolePort->tx_thread, NULL,
-				virtioHostConsoleReqHandleTx, pConsolePort);
-		if (ret) {
-			VIRTIO_CONSOLE_DEV_DBG(VIRTIO_CONSOLE_DEV_DBG_ERR,
-					"failed to create tx thread(%d)\n", ret);
-			goto err;
-		}
-
-		sem_init(&pConsolePort->tx_sem, 0, 0);
 
 		pConsoleBeDevArgs->nports++;
 	}
@@ -988,10 +927,8 @@ static int virtioHostConsoleDevCreate(struct virtioHostDev *pHostDev,
 	/* device parsing */
 	if (pConsoleBeDevArgs->nports == 0) {
 		VIRTIO_CONSOLE_DEV_DBG(VIRTIO_CONSOLE_DEV_DBG_ERR, "no port\n");
-		return -EINVAL;
-	}
-
-	if (pConsoleBeDevArgs->nports == 1) {
+		goto err;
+	} else if (pConsoleBeDevArgs->nports == 1) {
 		pConsoleBeDevArgs->queues = 2;
 		pConsoleBeDevArgs->multiport = false;
 	} else {
@@ -999,16 +936,24 @@ static int virtioHostConsoleDevCreate(struct virtioHostDev *pHostDev,
 		pConsoleBeDevArgs->multiport = true;
 	}
 
-	memcpy((void *)pConsoleBeDevArgs->channel, (void *)pHostDev->channels, sizeof(struct virtioChannel));
+	/* set device features */
+	pConsoleHostCtx->feature = (1UL << VIRTIO_F_VERSION_1) |
+		(1UL << VIRTIO_CONSOLE_F_SIZE) |
+		(1UL << VIRTIO_CONSOLE_F_EMERG_WRITE) |
+		(1UL << VIRTIO_RING_F_EVENT_IDX) |
+		(1UL << VIRTIO_RING_F_INDIRECT_DESC);
 
-	/* device initialization */
-	pConsoleHostCtx->nports = pConsoleBeDevArgs->nports;
+	if (pConsoleHostDev->beDevArgs.multiport)
+		pConsoleHostCtx->feature |= (1UL << VIRTIO_CONSOLE_F_MULTIPORT);
+
+	VIRTIO_CONSOLE_DEV_DBG(VIRTIO_CONSOLE_DEV_DBG_INFO,
+			"pConsoleHostCtx->feature:0x%lx\n",
+			pConsoleHostCtx->feature);
+
+	/* host device initialization */
 	pConsoleHostCtx->queues = pConsoleBeDevArgs->queues;
 
-	pConsoleHostCtx->cfg.cols = 80;
-	pConsoleHostCtx->cfg.rows = 25;
-	pConsoleHostCtx->cfg.max_nr_ports = VIRTIO_CONSOLE_MAXPORTS;
-	pConsoleHostCtx->cfg.emerg_wr = 0;
+	memcpy((void *)pConsoleBeDevArgs->channel, (void *)pHostDev->channels, sizeof(struct virtioChannel));
 
 	vhost->channelId = pConsoleBeDevArgs->channel->channelId;
 	vhost->pMaps = pConsoleBeDevArgs->channel->pMap;
@@ -1022,27 +967,54 @@ static int virtioHostConsoleDevCreate(struct virtioHostDev *pHostDev,
 			0, NULL,
 			&virtioConsoleHostOps);
 	if (ret) {
-		VIRTIO_CONSOLE_DEV_DBG (VIRTIO_CONSOLE_DEV_DBG_ERR,
+		VIRTIO_CONSOLE_DEV_DBG(VIRTIO_CONSOLE_DEV_DBG_ERR,
 				"failed to create virtio host device(%d)\n", ret);
 		goto err;
 	}
 
-	if (pConsoleBeDevArgs->multiport) {
-		pConsoleHostCtx->controlPort.pConsoleHostDev = pConsoleHostDev;
-		pConsoleHostCtx->controlPort.txq = 2;
-		pConsoleHostCtx->controlPort.rxq = 3;
-		pConsoleHostCtx->controlPort.enabled = true;
+	/* port initialization */
+	for (i = 0; i < pConsoleBeDevArgs->nports; i++) {
+		ret = virtioHostConsoleBeDevCreate(pConsoleHostDev, i);
+		if (ret)
+			goto err;
 
-		ret = pthread_create(&pConsoleHostCtx->controlPort.tx_thread, NULL,
-				virtioHostConsoleReqHandleControlTx, &pConsoleHostCtx->controlPort);
+		pConsolePort = &pConsoleHostCtx->ports[i];
+
+		ret = pthread_create(&pConsolePort->tx_thread, NULL,
+				virtioHostConsoleReqHandleTx, pConsolePort);
 		if (ret) {
 			VIRTIO_CONSOLE_DEV_DBG(VIRTIO_CONSOLE_DEV_DBG_ERR,
 					"failed to create tx thread(%d)\n", ret);
 			goto err;
 		}
 
+		sem_init(&pConsolePort->tx_sem, 0, 0);
+	}
+
+	if (pConsoleBeDevArgs->multiport) {
+		pConsoleHostCtx->controlPort.pConsoleHostDev = pConsoleHostDev;
+		pConsoleHostCtx->controlPort.rxq = 2;
+		pConsoleHostCtx->controlPort.txq = 3;
+		pConsoleHostCtx->controlPort.enabled = true;
+
+		ret = pthread_create(&pConsoleHostCtx->controlPort.tx_thread, NULL,
+				virtioHostConsoleReqHandleControlTx, &pConsoleHostCtx->controlPort);
+		if (ret) {
+			VIRTIO_CONSOLE_DEV_DBG(VIRTIO_CONSOLE_DEV_DBG_ERR,
+					"failed to create control tx thread(%d)\n", ret);
+			goto err;
+		}
+
 		sem_init(&pConsoleHostCtx->controlPort.tx_sem, 0, 0);
 	}
+
+	/* device initialization */
+	pConsoleHostCtx->nports = pConsoleBeDevArgs->nports;
+
+	pConsoleHostCtx->cfg.cols = 80;
+	pConsoleHostCtx->cfg.rows = 25;
+	pConsoleHostCtx->cfg.max_nr_ports = VIRTIO_CONSOLE_MAXPORTS;
+	pConsoleHostCtx->cfg.emerg_wr = 0;
 
 	pthread_mutex_lock(&vConsoleHostDrv.drvMtx);
 	vConsoleHostDrv.vConsoleHostDevList[vConsoleHostDrv.vConsoleHostDevNum]
@@ -1053,11 +1025,8 @@ static int virtioHostConsoleDevCreate(struct virtioHostDev *pHostDev,
 	/* Only notify FE of window size change of port0 according to standard v1.2 */
 	virtioHostConfigNotify(vhost);
 
-#ifdef VIRTIO_CONSOLE_DEV_DBG_ON
 	VIRTIO_CONSOLE_DEV_DBG(VIRTIO_CONSOLE_DEV_DBG_INFO,
 			"multiport:%d\n", pConsoleBeDevArgs->multiport);
-	VIRTIO_CONSOLE_DEV_DBG(VIRTIO_CONSOLE_DEV_DBG_INFO,
-			"buf_size:%d\n", pConsoleBeDevArgs->buf_size);
 	VIRTIO_CONSOLE_DEV_DBG(VIRTIO_CONSOLE_DEV_DBG_INFO,
 			"queues:%d\n", pConsoleBeDevArgs->queues);
 	VIRTIO_CONSOLE_DEV_DBG(VIRTIO_CONSOLE_DEV_DBG_INFO,
@@ -1077,7 +1046,6 @@ static int virtioHostConsoleDevCreate(struct virtioHostDev *pHostDev,
 		VIRTIO_CONSOLE_DEV_DBG(VIRTIO_CONSOLE_DEV_DBG_INFO,
 				"socket_type:%d\n", pConsoleBeDevArgs->ports[i].socket_type);
 	}
-#endif /* VIRTIO_CONSOLE_DEV_DBG_ON */
 
 	return 0;
 err:
@@ -1231,14 +1199,14 @@ static void* virtioHostConsoleReqDispatch(void *)
 
 				if (queueId / 2 != 1) { /* IO queue ID: 0,1,4,5... */
 					if (queueId % 2 == 0) {
+						if (!pConsoleHostCtx->ports[portId].rx_ready)
+							pConsoleHostCtx->ports[portId].rx_ready = 1;
+					} else {
 						ret = sem_post(&pConsoleHostCtx->ports[portId].tx_sem);
 						if (ret)
 							VIRTIO_CONSOLE_DEV_DBG(VIRTIO_CONSOLE_DEV_DBG_ERR,
 									"failed to sem_post tx_sem: %s\n",
 									strerror(errno));
-					} else {
-						if (!pConsoleHostCtx->ports[portId].rx_ready)
-							pConsoleHostCtx->ports[portId].rx_ready = 1;
 					}
 				} else { /* control queue ID: 2,3 */
 					ret = sem_post(&pConsoleHostCtx->controlPort.tx_sem);
@@ -1276,11 +1244,10 @@ static void* virtioHostConsoleReqDispatch(void *)
  *
  * ERRNO: N/A
  */
-static void* virtioHostConsoleReqHandleRx(void *arg)
+static void virtioHostConsoleReqHandleRx(struct virtioConsolePort *pConsolePort)
 {
-	int n, n_to_get, i, len, total, ret;
+	int n, i, len, total, ret;
 	uint16_t idx;
-	struct virtioConsolePort *pConsolePort = arg;
 	struct virtioHost *vhost;
 	struct virtioConsoleHostDev *pConsoleHostDev;
 	struct virtioConsoleHostCtx *pConsoleHostCtx;
@@ -1290,7 +1257,7 @@ static void* virtioHostConsoleReqHandleRx(void *arg)
 	struct virtioHostBuf bufList[VIRTIO_CONSOLE_IO_REQ_MAX];
 	struct iovec iov[VIRTIO_CONSOLE_IO_REQ_MAX];
 
-	pPorts = pConsolePort->rxq == 1 ? pConsolePort :
+	pPorts = pConsolePort->rxq == 0 ? pConsolePort :
 			pConsolePort - ((pConsolePort->rxq / 2) - 1);
 	pConsoleHostCtx = container_of((struct virtioConsolePort (*)[VIRTIO_CONSOLE_MAXPORTS])pPorts,
 			struct virtioConsoleHostCtx, ports);
@@ -1298,98 +1265,81 @@ static void* virtioHostConsoleReqHandleRx(void *arg)
 	vhost = (struct virtioHost *)pConsoleHostCtx;
 	pQueue = vhost->pQueue + pConsolePort->rxq;
 
-	n_to_get = MIN(pQueue->vRing.num, VIRTIO_CONSOLE_IO_REQ_MAX);
-
+	n = virtioHostQueueGetBuf(pQueue, &idx, bufList, VIRTIO_CONSOLE_IO_REQ_MAX);
 	VIRTIO_CONSOLE_DEV_DBG(VIRTIO_CONSOLE_DEV_DBG_INFO,
-			"vring.num:%d max:%u n_to_get:%d\n",
-			pQueue->vRing.num, VIRTIO_CONSOLE_IO_REQ_MAX, n_to_get);
+			"n:%d\n", n);
+	if (n == 0) {
+		VIRTIO_CONSOLE_DEV_DBG(VIRTIO_CONSOLE_DEV_DBG_INFO,
+				"no new queue buffer\n");
+		return;
+	}
 
-	while (1) {
-		ret = sem_wait(&pConsolePort->rx_sem);
-		if (ret < 0) {
-			VIRTIO_CONSOLE_DEV_DBG(VIRTIO_CONSOLE_DEV_DBG_ERR,
-					"failed to sem_wait rx_sem: %s\n", strerror(errno));
-		}
+	if (n < 0) {
+		VIRTIO_CONSOLE_DEV_DBG(VIRTIO_CONSOLE_DEV_DBG_ERR,
+				"failed to get buffer(%d)\n", n);
+		virtioHostConsoleAbort(pQueue, pQueue->availIdx);
+		return;
+	}
 
-		total = 0;
+	if (n > VIRTIO_CONSOLE_IO_REQ_MAX) {
+		VIRTIO_CONSOLE_DEV_DBG(VIRTIO_CONSOLE_DEV_DBG_ERR,
+				"invalid length of desc chain: %d, 1 to %d is valid\n",
+				n, VIRTIO_CONSOLE_IO_REQ_MAX);
 
-		while (1) {
-			n = virtioHostQueueGetBuf(pQueue, &idx, bufList, n_to_get);
-			VIRTIO_CONSOLE_DEV_DBG(VIRTIO_CONSOLE_DEV_DBG_INFO,
-					"n:%d\n", n);
-			if (n == 0) {
-				VIRTIO_CONSOLE_DEV_DBG(VIRTIO_CONSOLE_DEV_DBG_INFO,
-						"no new queue buffer\n");
-				break;
-			}
+		virtioHostConsoleAbort(pQueue, pQueue->availIdx);
+		return;
+	}
 
-			if (n < 0) {
-				VIRTIO_CONSOLE_DEV_DBG(VIRTIO_CONSOLE_DEV_DBG_ERR,
-						"failed to get buffer(%d)\n", n);
-				virtioHostConsoleAbort(pQueue, pQueue->availIdx);
-				break;
-			}
+	for (i = 0; i < n; i++) {
+		iov[i].iov_base = bufList[i].buf;
+		iov[i].iov_len = bufList[i].len;
+		VIRTIO_CONSOLE_DEV_DBG(VIRTIO_CONSOLE_DEV_DBG_INFO,
+				"len: %d\n", bufList[i].len);
+	}
 
-			if (n > n_to_get) {
-				VIRTIO_CONSOLE_DEV_DBG(VIRTIO_CONSOLE_DEV_DBG_ERR,
-						"invalid length of desc chain: %d, 1 to %d is valid\n",
-						n, n_to_get);
+	len = readv(be->fd, &iov[0], n);
+	if (len <= 0) {
+		VIRTIO_CONSOLE_DEV_DBG(VIRTIO_CONSOLE_DEV_DBG_ERR,
+				"failed to read len:%d, %s\n", len, strerror(errno));
 
-				virtioHostConsoleAbort(pQueue, pQueue->availIdx);
-				continue;
-			}
+		virtioHostConsoleAbort(pQueue, pQueue->availIdx);
 
-			for (i = 0; i < n; i++) {
-				iov[i].iov_base = bufList[i].buf;
-				iov[i].iov_len = bufList[i].len;
-			}
+		/* no data available */
+		if (len == -1 && errno == EAGAIN)
+			return;
 
-			len = readv(be->fd, &iov[0], n);
-			if (len <= 0) {
-				VIRTIO_CONSOLE_DEV_DBG(VIRTIO_CONSOLE_DEV_DBG_ERR,
-						"failed to readv(%d)\n", len);
+		/* when client User VM reboot or shutdown,
+		 * be->fd will be closed, then the return
+		 * value of readv function will be 0 */
+		if (len == 0 || errno == ECONNRESET)
+			goto clear;
 
-				virtioHostConsoleAbort(pQueue, pQueue->availIdx);
+		/* any other errors */
+		goto close;
+	}
 
-				/* no data available */
-				if (len == -1 && errno == EAGAIN)
-					break;
+	for (i = 0; i < 8; i++)
+		printf("%02x ", *((char *)bufList[0].buf + i));
+	printf("len: %d\n", len);
 
-				/* when client User VM reboot or shutdown,
-				 * be->fd will be closed, then the return
-				 * value of readv function will be 0 */
-				if (len == 0 || errno == ECONNRESET)
-					goto clear;
-
-				/* any other errors */
-				goto close;
-			}
-
-			total += len;
-		}
-
-		virtioHostConsoleDone(idx, pQueue, total);
-		continue;
-
+	virtioHostConsoleDone(idx, pQueue, len);
+	return;
 close:
+	virtioConsoleResetBackend(be);
+	VIRTIO_CONSOLE_DEV_DBG(VIRTIO_CONSOLE_DEV_DBG_ERR,
+			"be read failed and close! len = %d, errno = %d\n",
+			len, errno);
+clear:
+	if (be->be_type == VIRTIO_CONSOLE_BE_SOCKET &&
+			be->socket_type == VIRTIO_CONSOLE_BE_SOCKET_SERVER) {
+		virtioConsoleSocketClear(be);
+	} else if (be->be_type == VIRTIO_CONSOLE_BE_SOCKET &&
+			be->socket_type == VIRTIO_CONSOLE_BE_SOCKET_CLIENT) {
 		virtioConsoleResetBackend(be);
 		VIRTIO_CONSOLE_DEV_DBG(VIRTIO_CONSOLE_DEV_DBG_ERR,
 				"be read failed and close! len = %d, errno = %d\n",
 				len, errno);
-clear:
-		if (be->be_type == VIRTIO_CONSOLE_BE_SOCKET &&
-				be->socket_type == VIRTIO_CONSOLE_BE_SOCKET_SERVER) {
-			virtioConsoleSocketClear(be);
-		} else if (be->be_type == VIRTIO_CONSOLE_BE_SOCKET &&
-				be->socket_type == VIRTIO_CONSOLE_BE_SOCKET_CLIENT) {
-			virtioConsoleResetBackend(be);
-			VIRTIO_CONSOLE_DEV_DBG(VIRTIO_CONSOLE_DEV_DBG_ERR,
-					"be read failed and close! len = %d, errno = %d\n",
-					len, errno);
-		}
 	}
-
-	return NULL;
 }
 
 /*******************************************************************************
@@ -1405,7 +1355,7 @@ clear:
  */
 static void* virtioHostConsoleReqHandleTx(void *arg)
 {
-	int n, n_to_get, i, len, total, ret;
+	int n, i, ret;
 	uint16_t idx;
 	struct virtioConsolePort *pConsolePort = arg;
 	struct virtioHost *vhost;
@@ -1417,19 +1367,13 @@ static void* virtioHostConsoleReqHandleTx(void *arg)
 	struct virtioHostBuf bufList[VIRTIO_CONSOLE_IO_REQ_MAX];
 	struct iovec iov[VIRTIO_CONSOLE_IO_REQ_MAX];
 
-	pPorts = pConsolePort->txq == 0 ? pConsolePort :
+	pPorts = pConsolePort->txq == 1 ? pConsolePort :
 			pConsolePort - ((pConsolePort->txq / 2) - 1);
 	pConsoleHostCtx = container_of((struct virtioConsolePort (*)[VIRTIO_CONSOLE_MAXPORTS])pPorts,
 			struct virtioConsoleHostCtx, ports);
 
 	vhost = (struct virtioHost *)pConsoleHostCtx;
 	pQueue = vhost->pQueue + pConsolePort->txq;
-
-	n_to_get = MIN(pQueue->vRing.num, VIRTIO_CONSOLE_IO_REQ_MAX);
-
-	VIRTIO_CONSOLE_DEV_DBG(VIRTIO_CONSOLE_DEV_DBG_INFO,
-			"vring.num:%d max:%u n_to_get:%d\n",
-			pQueue->vRing.num, VIRTIO_CONSOLE_IO_REQ_MAX, n_to_get);
 
 	while (1) {
 		ret = sem_wait(&pConsolePort->tx_sem);
@@ -1438,10 +1382,8 @@ static void* virtioHostConsoleReqHandleTx(void *arg)
 					"failed to sem_wait tx_sem: %s\n", strerror(errno));
 		}
 
-		total = 0;
-
 		while (1) {
-			n = virtioHostQueueGetBuf(pQueue, &idx, bufList, n_to_get);
+			n = virtioHostQueueGetBuf(pQueue, &idx, bufList, VIRTIO_CONSOLE_IO_REQ_MAX);
 			VIRTIO_CONSOLE_DEV_DBG(VIRTIO_CONSOLE_DEV_DBG_INFO,
 					"n:%d\n", n);
 			if (n == 0) {
@@ -1457,10 +1399,10 @@ static void* virtioHostConsoleReqHandleTx(void *arg)
 				break;
 			}
 
-			if (n > n_to_get) {
+			if (n > VIRTIO_CONSOLE_IO_REQ_MAX) {
 				VIRTIO_CONSOLE_DEV_DBG(VIRTIO_CONSOLE_DEV_DBG_ERR,
 						"invalid length of desc chain: %d, 1 to %d is valid\n",
-						n, n_to_get);
+						n, VIRTIO_CONSOLE_IO_REQ_MAX);
 
 				virtioHostConsoleAbort(pQueue, pQueue->availIdx);
 				continue;
@@ -1469,10 +1411,14 @@ static void* virtioHostConsoleReqHandleTx(void *arg)
 			for (i = 0; i < n; i++) {
 				iov[i].iov_base = bufList[i].buf;
 				iov[i].iov_len = bufList[i].len;
+				VIRTIO_CONSOLE_DEV_DBG(VIRTIO_CONSOLE_DEV_DBG_INFO,
+						"len: %d\n", bufList[i].len);
 			}
 
 			ret = writev(be->fd, iov, n);
 			if (ret <= 0) {
+				VIRTIO_CONSOLE_DEV_DBG(VIRTIO_CONSOLE_DEV_DBG_ERR,
+						"failed to write ret:%d, %s\n", ret, strerror(errno));
 				/* Case 1:backend cannot receive more data. For example when pts is
 				 * not connected to any client, its tty buffer will become full.
 				 * In this case we just drop data from guest hvc console.
@@ -1485,8 +1431,9 @@ static void* virtioHostConsoleReqHandleTx(void *arg)
 				 * client connection at a later point. To avoid this, ignore
 				 * ENOTCONN error.
 				 */
-				if (ret == -1 && (errno == EAGAIN || errno == ENOTCONN))
+				if (ret == -1 && (errno == EAGAIN || errno == ENOTCONN)) {
 					break;
+				}
 
 				if (ret == -1 && errno == EBADF) {
 					if (be->be_type == VIRTIO_CONSOLE_BE_SOCKET &&
@@ -1497,14 +1444,15 @@ static void* virtioHostConsoleReqHandleTx(void *arg)
 				}
 
 				virtioConsoleResetBackend(be);
-				VIRTIO_CONSOLE_DEV_DBG(VIRTIO_CONSOLE_DEV_DBG_ERR,
-						"be write failed! errno = %d\n", errno);
+				break;
 			}
 
-			total += len;
-		}
+			for (i = 0; i < 8; i++)
+				printf("%02x ", *((char *)bufList[0].buf + i));
+			printf("len: %d\n", ret);
 
-		virtioHostConsoleDone(idx, pQueue, total);
+			virtioHostConsoleDone(idx, pQueue, ret);
+		}
 	}
 
 	return NULL;
@@ -1583,7 +1531,7 @@ static void virtioConsoleOpenPort(struct virtioConsolePort *port, bool open)
  */
 static void* virtioHostConsoleReqHandleControlTx(void *arg)
 {
-	int n, n_to_get, i, len, total, ret;
+	int n, i, len, total, ret;
 	uint16_t idx;
 	struct virtioConsolePort *pConsolePort = arg;
 	struct virtioHost *vhost;
@@ -1594,7 +1542,7 @@ static void* virtioHostConsoleReqHandleControlTx(void *arg)
 	struct virtioHostBuf bufList[VIRTIO_CONSOLE_IO_REQ_MAX];
 	struct virtio_console_control resp, *ctrl;
 
-	if (!pConsolePort || pConsolePort->txq != 2) {
+	if (!pConsolePort || pConsolePort->txq != 3) {
 		VIRTIO_CONSOLE_DEV_DBG(VIRTIO_CONSOLE_DEV_DBG_ERR,
 				"invalid argument\n");
 		return NULL;
@@ -1604,12 +1552,6 @@ static void* virtioHostConsoleReqHandleControlTx(void *arg)
 	pConsoleHostDev = (struct virtioConsoleHostDev *)pConsoleHostCtx;
 	vhost = (struct virtioHost *)pConsoleHostCtx;
 	pQueue = vhost->pQueue + pConsolePort->txq;
-
-	n_to_get = MIN(pQueue->vRing.num, VIRTIO_CONSOLE_IO_REQ_MAX);
-
-	VIRTIO_CONSOLE_DEV_DBG(VIRTIO_CONSOLE_DEV_DBG_INFO,
-			"vring.num:%d max:%u n_to_get:%d\n",
-			pQueue->vRing.num, VIRTIO_CONSOLE_IO_REQ_MAX, n_to_get);
 
 	while (1) {
 		ret = sem_wait(&pConsolePort->tx_sem);
@@ -1621,7 +1563,7 @@ static void* virtioHostConsoleReqHandleControlTx(void *arg)
 		total = 0;
 
 		while (1) {
-			n = virtioHostQueueGetBuf(pQueue, &idx, bufList, n_to_get);
+			n = virtioHostQueueGetBuf(pQueue, &idx, bufList, VIRTIO_CONSOLE_IO_REQ_MAX);
 			VIRTIO_CONSOLE_DEV_DBG(VIRTIO_CONSOLE_DEV_DBG_INFO,
 					"n:%d\n", n);
 			if (n == 0) {
@@ -1637,10 +1579,10 @@ static void* virtioHostConsoleReqHandleControlTx(void *arg)
 				break;
 			}
 
-			if (n > n_to_get) {
+			if (n > VIRTIO_CONSOLE_IO_REQ_MAX) {
 				VIRTIO_CONSOLE_DEV_DBG(VIRTIO_CONSOLE_DEV_DBG_ERR,
 						"invalid length of desc chain: %d, 1 to %d is valid\n",
-						n, n_to_get);
+						n, VIRTIO_CONSOLE_IO_REQ_MAX);
 
 				virtioHostConsoleAbort(pQueue, pQueue->availIdx);
 				continue;
@@ -1782,8 +1724,8 @@ static int virtioHostConsoleReset(struct virtioHost *vHost)
 
 	vConsoleHostCtx = (struct virtioConsoleHostCtx *)vHost;
 	if (!vConsoleHostCtx) {
-		VIRTIO_CONSOLE_DEV_DBG (VIRTIO_CONSOLE_DEV_DBG_ERR,
-				"%s: null vConsoleHostCtx\n", __FUNCTION__);
+		VIRTIO_CONSOLE_DEV_DBG(VIRTIO_CONSOLE_DEV_DBG_ERR,
+				"null vConsoleHostCtx\n");
 		return -1;
 	}
 
@@ -1808,8 +1750,8 @@ static int virtioHostConsoleCfgRead(struct virtioHost *vHost, uint64_t address,
 	uint8_t *cfgAddr;
 
 	if (!vHost) {
-		VIRTIO_CONSOLE_DEV_DBG (VIRTIO_CONSOLE_DEV_DBG_ERR,
-				"%s NULL pointer \n", __FUNCTION__);
+		VIRTIO_CONSOLE_DEV_DBG(VIRTIO_CONSOLE_DEV_DBG_ERR,
+				"NULL pointer\n");
 		return -EINVAL;
 	}
 
@@ -1877,8 +1819,6 @@ static void virtioHostConsoleShow(struct virtioHost * vHost, uint32_t indent)
 
 	printf("%*smultiport   [%d]\n", (indent + 2) * 3, "",
 			pConsoleHostDev->beDevArgs.multiport);
-	printf("%*sbuffer size [%d]\n", (indent + 2) * 3, "",
-			pConsoleHostDev->beDevArgs.buf_size);
 	printf("%*squeues      [%d]\n", (indent + 2) * 3, "",
 			pConsoleHostDev->beDevArgs.queues);
 	printf("%*snports      [%d]\n", (indent + 2) * 3, "",
