@@ -40,5 +40,3 @@ do_install() {
 }
 
 RRECOMMENDS_${PN} += "${PN}"
-
-TARGET_LDFLAGS += "-pthread"

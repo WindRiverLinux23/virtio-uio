@@ -13,7 +13,7 @@ SRCS = virtioUioTest.c \
 BINARY = uio_test
 
 OBJS = $(SRCS:.c=.o)
-LIBS = -lyaml -lssl -lcrypto -luring
+LIBS = -lyaml -lssl -lcrypto -luring -pthread
 
 .c.o:
 	$(CC) $(CFLAGS) -c -o $@ $<
