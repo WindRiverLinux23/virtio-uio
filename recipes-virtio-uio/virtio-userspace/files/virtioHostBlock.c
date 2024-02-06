@@ -36,7 +36,6 @@
 #endif
 #include <linux/fs.h>
 #include <linux/virtio_blk.h>
-#include <liburing.h>
 #include "virtioHostLib.h"
 
 /* #define VIRTIO_BLK_PERF */
@@ -56,7 +55,6 @@
 
 static uint32_t virtioBlkDevDbgMask = VIRTIO_BLK_DEV_DBG_ERR;
 
-#undef VIRTIO_BLK_DEV_DBG
 #define VIRTIO_BLK_DEV_DBG(mask, fmt, ...)				\
 	do {								\
 		if ((virtioBlkDevDbgMask & (mask)) ||			\
@@ -77,11 +75,10 @@ while ((false))
 #define VIRTIO_BLK_QUEUE_MAX_NUM 2048  /* max number of descriptors in a queue*/
 #define VIRTIO_BLK_DISK_ID_BYTES 20
 
-#define VIRTIO_BLK_IO_REQ_MAX    256
+#define BLOCK_IO_REQ_MAX         256
 #define VIRTIO_BLK_SIZE          512
 
 #define VIRTIO_BLK_HOST_DEV_MAX  30
-#define VIRTIO_BLK_DISP_OBJ_MAX (VIRTIO_BLK_QUEUE_MAX_NUM / VIRTIO_BLK_IO_REQ_MAX * VIRTIO_BLK_HOST_DEV_MAX)
 
 /* feature */
 #define HEX_CODE_CHECK(s, mode)                                                \
@@ -149,7 +146,7 @@ struct virtioBlkReqHdr {                 /* fixed-size block header */
 
 struct virtioBlkIoReq {                  /* virtio block I/O request */
 	struct virtioBlkHostCtx *blkHostCtx;
-	struct virtioHostBuf bufList[VIRTIO_BLK_IO_REQ_MAX];
+	struct virtioHostBuf bufList[BLOCK_IO_REQ_MAX];
 	int bufcnt;
 	uint16_t idx;
 	uint64_t offset;
@@ -186,7 +183,6 @@ struct virtioBlkHostDev {
 		struct virtioChannel channel[1];
 	} beDevArgs;
 	int fd;
-	struct io_uring ring;
 	bool rdOnly;
 	uint64_t capacity;
 	uint32_t blkSize;
@@ -195,21 +191,10 @@ struct virtioBlkHostDev {
 	char ident[VIRTIO_BLK_DISK_ID_BYTES + 1];
 };
 
-struct virtioDispObj {
-	TAILQ_ENTRY(virtioDispObj) link;
-	struct virtioHostQueue *pQueue;
-};
-
 static struct virtioBlkHostDrv {
 	struct virtioBlkHostDev * vBlkHostDevList[VIRTIO_BLK_HOST_DEV_MAX];
 	uint32_t vBlkHostDevNum;
-	pthread_mutex_t drvMtx;
-	TAILQ_HEAD(, virtioDispObj) dispFreeQ;
-	TAILQ_HEAD(, virtioDispObj) dispBusyQ;
-	pthread_t dispThread;
-	pthread_mutex_t dispMtx;
-	pthread_cond_t dispCond;
-	struct virtioDispObj dispObj[VIRTIO_BLK_DISP_OBJ_MAX];
+	pthread_mutex_t drvLock;
 	uint32_t mountTimeout;
 } vBlkHostDrv;
 
@@ -219,7 +204,6 @@ static void virtioHostBlkFlush(struct virtioBlkIoReq *);
 static void virtioHostBlkGetId(struct virtioBlkIoReq *);
 static int virtioHostBlkCfgRead(struct virtioHost *, uint64_t, uint64_t size, uint32_t *);
 static int virtioHostBlkCfgWrite(struct virtioHost *, uint64_t, uint64_t, uint32_t);
-static void* virtioHostBlkReqDispatch(void *);
 static void* virtioHostBlkReqHandle(void *pBlkHostCtx);
 static void virtioHostBlkDone(struct  virtioBlkIoReq *, struct virtioHostQueue *, int);
 static int virtioHostBlkCreate(struct virtioHostDev *);
@@ -259,27 +243,15 @@ char *memDisk = NULL;
 
 void virtioHostBlkDrvInit(uint32_t mountTimeout)
 {
-	int ret, i;
-
+	VIRTIO_BLK_DEV_DBG(VIRTIO_BLK_DEV_DBG_INFO,
+			   "enter\n");
 	virtioHostDrvRegister((struct virtioHostDrvInfo *)&virtioBlkHostDrvInfo);
 
-	pthread_mutex_init(&vBlkHostDrv.drvMtx, NULL);
-
-	TAILQ_INIT(&vBlkHostDrv.dispFreeQ);
-	TAILQ_INIT(&vBlkHostDrv.dispBusyQ);
-	for (i = 0; i < VIRTIO_BLK_DISP_OBJ_MAX; i++) {
-		TAILQ_INSERT_HEAD(&vBlkHostDrv.dispFreeQ, &vBlkHostDrv.dispObj[i], link);
-	}
-	pthread_mutex_init(&vBlkHostDrv.dispMtx, NULL);
-	pthread_cond_init(&vBlkHostDrv.dispCond, NULL);
-
-	ret = pthread_create(&vBlkHostDrv.dispThread, NULL, virtioHostBlkReqDispatch, NULL);
-	if (ret) {
-		VIRTIO_BLK_DEV_DBG(VIRTIO_BLK_DEV_DBG_ERR,
-				"failed to create virtio block host dispatch thread\n");
-	}
+	pthread_mutex_init(&vBlkHostDrv.drvLock, NULL);
 
 	vBlkHostDrv.mountTimeout = mountTimeout;
+	VIRTIO_BLK_DEV_DBG(VIRTIO_BLK_DEV_DBG_INFO,
+			   "done\n");
 }
 
 void virtioHostBlkDrvRelease(void)
@@ -292,17 +264,16 @@ void virtioHostBlkDrvRelease(void)
 		pBlkHostDev = vBlkHostDrv.vBlkHostDevList[devNum];
 		pBlkHostCtx = (struct virtioBlkHostCtx *)pBlkHostDev;
 
-		if (pBlkHostDev) {
-			if (pBlkHostDev->fd > 0)
-				close(pBlkHostDev->fd);
-			io_uring_queue_exit(&pBlkHostDev->ring);
-		}
+#if 0 //TODO
+		if (pBlkHostDev)
+			if (pBlkHostDev->bdev)
+				blkdev_put(pBlkHostDev->bdev, FMODE_READ | FMODE_WRITE);
+#endif
 
-		if (pBlkHostCtx)
-		    if (pBlkHostCtx->work_thread &&
-			pthread_cancel(pBlkHostCtx->work_thread) == 0) {
-				pthread_join(pBlkHostCtx->work_thread, NULL);
-		    }
+		if (pBlkHostCtx && pBlkHostCtx->work_thread &&
+		    pthread_cancel(pBlkHostCtx->work_thread) == 0) {
+			pthread_join(pBlkHostCtx->work_thread, NULL);
+		}
 
 		virtioHostRelease(&pBlkHostCtx->vhost);
 
@@ -339,7 +310,7 @@ int virtioHostBlkFlushOp(struct virtioBlkHostDev *pBlkHostDev)
  * virtioHostBlkSubmitBio - virto block host submit block IO request to general
  * block layer
  *
- * This routine is used to write data or read date to or from backend storage
+ * This routine is used to write data to or read data from backend storage
  * media.
  *
  * RETURN: N/A
@@ -350,14 +321,12 @@ static void virtioHostBlkSubmitBio(struct virtioBlkIoReq *pBlkReq)
 {
 	struct virtioBlkHostDev *pBlkHostDev;
 	struct virtioHost *vhost;
-	struct iovec iov[VIRTIO_BLK_IO_REQ_MAX];
-	int ret, i;
-#ifdef VIRTIO_BLK_MEM_DISK
-	uint64_t offset = 0;
-#else
-	struct io_uring_sqe *sqe;
-#endif
+	int ret = 0;
+	int len, i;
+	off_t offset;
 
+	VIRTIO_BLK_DEV_DBG(VIRTIO_BLK_DEV_DBG_INFO,
+			   "start\n");
 	pBlkHostDev = (struct virtioBlkHostDev *)pBlkReq->blkHostCtx;
 	if (pBlkHostDev->beDevArgs.isFile) {
 		VIRTIO_BLK_DEV_DBG(VIRTIO_BLK_DEV_DBG_ERR,
@@ -371,57 +340,60 @@ static void virtioHostBlkSubmitBio(struct virtioBlkIoReq *pBlkReq)
 	clock_gettime(CLOCK_MONOTONIC, &pReqHdr->time3);
 #endif
 
-	pBlkReq->len = 0;
-	for (i = 0; i < pBlkReq->bufcnt; i++) {
+	offset = pBlkReq->offset * VIRTIO_BLK_SIZE;
+
 #ifdef VIRTIO_BLK_MEM_DISK
-		(void)memcpy(memDisk + (offset % (VIRTIO_BLK_MEM_DISK_BLK_NUM * pBlkHostDev->blkSize)),
-			pBlkReq->bufList[i].buf, pBlkReq->bufList[i].len);
+	for (i = 0; i < pBlkReq->bufcnt; i++) {
+		if (pBlkReq->opType == BLK_OP_READ) {
+			(void)memcpy(pBlkReq->bufList[i].buf,
+					memDisk + (offset % (VIRTIO_BLK_MEM_DISK_BLK_NUM * pBlkHostDev->blkSize)),
+					pBlkReq->bufList[i].len);
+		} else if (pBlkReq->opType == BLK_OP_WRITE) {
+			(void)memcpy(memDisk + (offset % (VIRTIO_BLK_MEM_DISK_BLK_NUM * pBlkHostDev->blkSize)),
+					pBlkReq->bufList[i].buf, pBlkReq->bufList[i].len);
+		}
 		offset += pBlkReq->bufList[i].len;
+	}
 #else
-		iov[i].iov_base = pBlkReq->bufList[i].buf;
-		iov[i].iov_len = pBlkReq->bufList[i].len;
-#endif
-		pBlkReq->len += pBlkReq->bufList[i].len;
-	}
-
-#ifndef VIRTIO_BLK_MEM_DISK
-	sqe = io_uring_get_sqe(&pBlkHostDev->ring);
-	if (!sqe) {
-		VIRTIO_BLK_DEV_DBG(VIRTIO_BLK_DEV_DBG_ERR,
-				"failed to get SQE\n");
-		return;
-	}
-
-	io_uring_sqe_set_data(sqe, pBlkReq);
-
 	switch (pBlkReq->opType) {
 		case BLK_OP_READ:
-			io_uring_prep_readv(sqe, pBlkHostDev->fd, &iov[0],
-					pBlkReq->bufcnt, pBlkReq->offset);
+			for (i = 0; i < pBlkReq->bufcnt; i++) {
+				len = pread(pBlkHostDev->fd,
+						pBlkReq->bufList[i].buf,
+						pBlkReq->bufList[i].len,
+						offset);
+				if (len < 0) {
+					VIRTIO_BLK_DEV_DBG(VIRTIO_BLK_DEV_DBG_ERR,
+							"failed to pread: %s\n", strerror(errno));
+					ret = errno;
+				}
+				offset += pBlkReq->bufList[i].len;
+			}
 			break;
 		case BLK_OP_WRITE:
-			io_uring_prep_writev(sqe, pBlkHostDev->fd, &iov[0],
-					pBlkReq->bufcnt, pBlkReq->offset);
+			for (i = 0; i < pBlkReq->bufcnt; i++) {
+				len = pwrite(pBlkHostDev->fd,
+						pBlkReq->bufList[i].buf,
+						pBlkReq->bufList[i].len,
+						offset);
+				if (len < 0) {
+					VIRTIO_BLK_DEV_DBG(VIRTIO_BLK_DEV_DBG_ERR,
+							"failed to pwrite: %s\n", strerror(errno));
+					ret = errno;
+				}
+				offset += pBlkReq->bufList[i].len;
+			}
 			break;
+		case BLK_OP_FLUSH:
+			if (fsync(pBlkHostDev->fd)) {
+				VIRTIO_BLK_DEV_DBG(VIRTIO_BLK_DEV_DBG_ERR,
+						"failed to fsync: %s\n", strerror(errno));
+				ret = errno;
+			}
+		case BLK_OP_DISCARD:
 		default:
 			ret = -ENOTSUP;
 			break;
-	}
-
-	/*
-	 * Nonblockingly submit the request to native driver. We will wait for
-	 * completion after all requests in available ring are submitted.
-	 */
-	ret = io_uring_submit(&pBlkHostDev->ring);
-	if (ret < 0) {
-		VIRTIO_BLK_DEV_DBG(VIRTIO_BLK_DEV_DBG_ERR,
-				"failed to submit %d SQE: %s, only %d\n",
-				pBlkReq->bufcnt, strerror(errno), ret);
-		ret = errno;
-	} if (ret != pBlkReq->bufcnt) {
-		VIRTIO_BLK_DEV_DBG(VIRTIO_BLK_DEV_DBG_ERR,
-				"failed to submit only %d SQE: %s\n", ret, strerror(errno));
-		ret = errno;
 	}
 #endif
 
@@ -435,6 +407,11 @@ static void virtioHostBlkSubmitBio(struct virtioBlkIoReq *pBlkReq)
 		ret = virtioHostBlkFlushOp(pBlkHostDev);
 	}
 #endif
+
+	virtioHostBlkDone(pBlkReq, vhost->pQueue, ret);
+
+	VIRTIO_BLK_DEV_DBG(VIRTIO_BLK_DEV_DBG_INFO,
+			   "done\n");
 	return;
 }
 
@@ -537,14 +514,6 @@ static int virtioHostBlkCreateWithBlk(struct virtioBlkHostDev *pBlkHostDev)
 		return -ENOMEM;
 	}
 #else
-	/* Every single buffer can be a buffer chain and in turn an SQE */
-	ret = io_uring_queue_init(VIRTIO_BLK_QUEUE_MAX_NUM, &pBlkHostDev->ring, 0);
-	if (ret < 0) {
-		VIRTIO_BLK_DEV_DBG(VIRTIO_BLK_DEV_DBG_ERR,
-				"failed to init uring(%d)\n", ret);
-		return -EFAULT;
-	}
-
 	pBlkHostDev->fd = open(pBlkBeDevArgs->bePath, O_RDWR);
 	if (pBlkHostDev->fd < 0) {
 		VIRTIO_BLK_DEV_DBG(VIRTIO_BLK_DEV_DBG_ERR,
@@ -620,8 +589,8 @@ static int virtioHostBlkCreateWithBlk(struct virtioBlkHostDev *pBlkHostDev)
 	pBlkHostDev->blkSize = VIRTIO_BLK_SIZE;
 	pBlkHostDev->capacity = size / VIRTIO_BLK_SIZE;
 
-	VIRTIO_BLK_DEV_DBG(VIRTIO_BLK_DEV_DBG_INFO,
-			"fd:%d\nblkSize:%x\nlogBlkSize:%x\nphyBlkSize:%x\ncapacity:0x%lx\n",
+	VIRTIO_BLK_DEV_DBG(VIRTIO_BLK_DEV_DBG_ERR,
+			"fd:%d\nblkSize:0x%x\nlogBlkSize:0x%x\nphyBlkSize:0x%x\ncapacity:0x%lx\n",
 			pBlkHostDev->fd,
 			pBlkHostDev->blkSize,
 			pBlkHostDev->logBlkSize,
@@ -674,7 +643,7 @@ static int virtioHostBlkBeDevCreate(struct virtioBlkHostDev *pBlkHostDev)
 	pBlkHostCtx->cfg.capacity = host_virtio64_to_cpu(&pBlkHostCtx->vhost,
 			pBlkHostDev->capacity);
 	pBlkHostCtx->cfg.seg_max  = host_virtio32_to_cpu(&pBlkHostCtx->vhost,
-			VIRTIO_BLK_IO_REQ_MAX);
+			BLOCK_IO_REQ_MAX);
 	pBlkHostCtx->cfg.blk_size = host_virtio32_to_cpu(&pBlkHostCtx->vhost,
 			pBlkHostDev->logBlkSize);
 	pBlkHostCtx->cfg.num_queues = (uint16_t)host_virtio16_to_cpu(&pBlkHostCtx->vhost,
@@ -796,13 +765,13 @@ static int virtioHostBlkDevCreate(struct virtioBlkHostDev *pBlkHostDev)
 		goto err;
 	}
 
-	pthread_mutex_lock(&vBlkHostDrv.drvMtx);
+	pthread_mutex_lock(&vBlkHostDrv.drvLock);
 
 	vBlkHostDrv.vBlkHostDevList[vBlkHostDrv.vBlkHostDevNum] = pBlkHostDev;
 
 	devNum = vBlkHostDrv.vBlkHostDevNum++;
 
-	pthread_mutex_unlock(&vBlkHostDrv.drvMtx);
+	pthread_mutex_unlock(&vBlkHostDrv.drvLock);
 
 	ret = pthread_create(&pBlkHostCtx->work_thread, NULL, virtioHostBlkReqHandle, pBlkHostCtx);
 	if (ret) {
@@ -1086,7 +1055,7 @@ static int virtioHostBlkCreate(struct virtioHostDev *pHostDev)
 	char *pBuf;
 	int ret;
 
-	VIRTIO_BLK_DEV_DBG(VIRTIO_BLK_DEV_DBG_INFO, "start\n");
+	VIRTIO_BLK_DEV_DBG(VIRTIO_BLK_DEV_DBG_INFO, "virtioHostBlkCreate start\n");
 
 	if (!pHostDev) {
 		VIRTIO_BLK_DEV_DBG(VIRTIO_BLK_DEV_DBG_ERR,
@@ -1123,7 +1092,7 @@ static int virtioHostBlkCreate(struct virtioHostDev *pHostDev)
 	}
 
 	VIRTIO_BLK_DEV_DBG(VIRTIO_BLK_DEV_DBG_INFO,
-			"sizeof(struct virtioBlkHostDev) %ld bytes\n",
+			"virtioHostBlkCreate sizeof(struct virtioBlkHostDev) %ld bytes\n",
 			sizeof(struct virtioBlkHostDev));
 
 	pBlkHostDev = calloc(1, sizeof(struct virtioBlkHostDev));
@@ -1155,7 +1124,7 @@ exit:
 		return ret;
 	}
 
-	VIRTIO_BLK_DEV_DBG(VIRTIO_BLK_DEV_DBG_INFO, "done\n");
+	VIRTIO_BLK_DEV_DBG(VIRTIO_BLK_DEV_DBG_INFO, "virtioHostBlkCreate done\n");
 
 	return 0;
 }
@@ -1184,68 +1153,6 @@ static void virtioHostBlkAbort(struct virtioHostQueue *pQueue, uint16_t idx)
 
 /*******************************************************************************
  *
- * virtioHostBlkReqDispatch - virtio block device dispatch task
- *
- * This routine is used to dispatch virtio block device IO requests to specific
- * handling thread(s).
- *
- * RETURNS: 0, or -1 if the recieved operation request with a invalid format or
- * error meeting a failure in process of filesystem operation.
- *
- * ERRNO: N/A
- */
-
-static void* virtioHostBlkReqDispatch(void *my_unused)
-{
-	struct virtioBlkHostCtx *pBlkHostCtx;
-	struct virtioDispObj *pDispObj;
-	int ret;
-
-	pthread_mutex_lock(&vBlkHostDrv.dispMtx);
-
-	while (1) {
-		while (1) {
-			if (TAILQ_EMPTY(&vBlkHostDrv.dispBusyQ))
-				break;
-
-			pDispObj = TAILQ_FIRST(&vBlkHostDrv.dispBusyQ);
-			if (pDispObj) {
-				TAILQ_REMOVE(&vBlkHostDrv.dispBusyQ, pDispObj, link);
-			} else {
-				VIRTIO_BLK_DEV_DBG(VIRTIO_BLK_DEV_DBG_ERR,
-						"failed to get dispatch object from busy queue\n");
-			}
-
-			pthread_mutex_unlock(&vBlkHostDrv.dispMtx);
-
-			if (pDispObj && pDispObj->pQueue && pDispObj->pQueue->vHost) {
-				pBlkHostCtx = (struct virtioBlkHostCtx *)pDispObj->pQueue->vHost;
-				ret = sem_post(&pBlkHostCtx->work_sem);
-				if (ret) {
-					VIRTIO_BLK_DEV_DBG(VIRTIO_BLK_DEV_DBG_ERR,
-							"failed to sem_post work_sem: %s\n",
-							strerror(errno));
-				}
-			} else {
-				VIRTIO_BLK_DEV_DBG(VIRTIO_BLK_DEV_DBG_ERR,
-						"failed to get virtqueue from busy object\n");
-			}
-
-			pthread_mutex_lock(&vBlkHostDrv.dispMtx);
-
-			TAILQ_INSERT_TAIL(&vBlkHostDrv.dispFreeQ, pDispObj, link);
-		}
-
-		pthread_cond_wait(&vBlkHostDrv.dispCond, &vBlkHostDrv.dispMtx);
-	}
-
-	pthread_mutex_unlock(&vBlkHostDrv.dispMtx);
-
-	return NULL;
-}
-
-/*******************************************************************************
- *
  * virtioHostBlkReqHandle - virtio block device handle task
  *
  * This routine is used to handle virtio block device read or write operations.
@@ -1265,26 +1172,23 @@ static void* virtioHostBlkReqHandle(void *pBlkHostCtx)
 	struct virtioBlkHostCtx *vBlkHostCtx = pBlkHostCtx;
 	struct virtioBlkHostDev *vBlkHostDev;
 	struct virtioBlkIoReq *pBlkReq;
-	struct virtioHostBuf bufList[VIRTIO_BLK_IO_REQ_MAX + 2];
-	struct io_uring_cqe *cqe;
-	unsigned head;
-	int ret, reqCnt;
+	struct virtioHostBuf bufList[BLOCK_IO_REQ_MAX + 2];
+	int rc;
 
 	vhost = (struct virtioHost *)vBlkHostCtx;
 	vBlkHostDev = (struct virtioBlkHostDev *)vBlkHostCtx;
 
         while(1) {                                                                   
-                ret = sem_wait(&vBlkHostCtx->work_sem);
-                if (ret < 0) {
+                rc = sem_wait(&vBlkHostCtx->work_sem);
+                if (rc < 0) {
 			VIRTIO_BLK_DEV_DBG(VIRTIO_BLK_DEV_DBG_ERR,
 					"failed to sem_wait work_sem: %s\n", strerror(errno));
                         continue;
                 }
 
 		while (1) {
-			/* Get one chain of buffers from the virtqueue */
 			n = virtioHostQueueGetBuf(vhost->pQueue, &idx, bufList,
-					VIRTIO_BLK_IO_REQ_MAX + 2);
+					BLOCK_IO_REQ_MAX + 2);
 			if (n == 0) {
 				VIRTIO_BLK_DEV_DBG(VIRTIO_BLK_DEV_DBG_INFO,
 						"no new queue buffer\n");
@@ -1297,22 +1201,21 @@ static void* virtioHostBlkReqHandle(void *pBlkHostCtx)
 				break;
 			}
 
-			if ((n < 2) || (n > VIRTIO_BLK_IO_REQ_MAX + 2)) {
+			if ((n < 2) || (n > BLOCK_IO_REQ_MAX + 2)) {
 				VIRTIO_BLK_DEV_DBG(VIRTIO_BLK_DEV_DBG_ERR,
 						"invalid length of desc chain: %d, while 2 to %d is valid\n",
-						n, VIRTIO_BLK_IO_REQ_MAX + 2);
+						n, BLOCK_IO_REQ_MAX + 2);
 
 				virtioHostBlkAbort(vhost->pQueue, vhost->pQueue->availIdx);
 				continue;
 			}
 
-			/* Reset read/write request counter */
-			reqCnt = 0;
-
 			pReqHdr = (struct virtioBlkReqHdr *)bufList[0].buf;
+
 #ifdef VIRTIO_BLK_PERF
 			clock_gettime(CLOCK_MONOTONIC, &pReqHdr->time2);
 #endif
+
 			pReqHdr->type = host_virtio32_to_cpu(vhost, host_readl(&pReqHdr->type));
 			pReqHdr->sector = host_virtio64_to_cpu(vhost, host_readq(&pReqHdr->sector));
 
@@ -1350,16 +1253,15 @@ static void* virtioHostBlkReqHandle(void *pBlkHostCtx)
 					continue;
 				}
 
-				reqCnt++;
 				pBlkReq->opType = BLK_OP_WRITE;
 				virtioHostBlkSubmitBio(pBlkReq);
 				continue;
 			} else if (pReqHdr->type == VIRTIO_BLK_T_IN) {
-				reqCnt++;
 				pBlkReq->opType = BLK_OP_READ;
 				virtioHostBlkSubmitBio(pBlkReq);
 				continue;
 			} else if (pReqHdr->type == VIRTIO_BLK_T_FLUSH) {
+				//TODO pBlkReq->opType = BLK_OP_FLUSH;
 				virtioHostBlkFlush(pBlkReq);
 				continue;
 			} else if (pReqHdr->type == VIRTIO_BLK_T_GET_ID) {
@@ -1382,51 +1284,6 @@ static void* virtioHostBlkReqHandle(void *pBlkHostCtx)
 				continue;
 			}
 		}
-
-		/* Continue if no read or write request */
-		if (!reqCnt) {
-			/* Re-enable kick from FE driver */
-			virtioHostQueueIntrEnable(vhost->pQueue);
-			continue;
-		}
-
-		/*
-		 * Asynchronously wait for all read and write requests submitted
-		 * in the above loop to be done so as to let the Linux native
-		 * driver stack optimize the requests as much as possible.
-		 */
-		ret = io_uring_wait_cqes(&vBlkHostDev->ring, &cqe, reqCnt, NULL, NULL);
-		if (ret < reqCnt) {
-			VIRTIO_BLK_DEV_DBG(VIRTIO_BLK_DEV_DBG_ERR,
-					"failed to wait for %d SQEs: %s, only got %d\n",
-					reqCnt, strerror(errno), ret);
-		}
-
-		io_uring_for_each_cqe(&vBlkHostDev->ring, head, cqe) {
-			pBlkReq = io_uring_cqe_get_data(cqe);
-			if (!pBlkReq) {
-				VIRTIO_BLK_DEV_DBG(VIRTIO_BLK_DEV_DBG_ERR,
-						"failed to get user data from CQE, uring may have crashed!\n");
-				io_uring_cqe_seen(&vBlkHostDev->ring, cqe);
-				continue;
-			}
-
-			if (cqe->res < 0 || cqe->res != pBlkReq->len) {
-				VIRTIO_BLK_DEV_DBG(VIRTIO_BLK_DEV_DBG_ERR,
-						"failed to read or write %ld bytes, only done %d\n",
-						pBlkReq->len, cqe->res);
-				ret = EIO;
-			} else {
-				ret = 0;
-			}
-
-			virtioHostBlkDone(pBlkReq, vhost->pQueue, ret);
-
-			io_uring_cqe_seen(&vBlkHostDev->ring, cqe);
-		}
-
-		/* Re-enable kick from FE driver */
-		virtioHostQueueIntrEnable(vhost->pQueue);
 	}
 }
 
@@ -1444,38 +1301,22 @@ static void* virtioHostBlkReqHandle(void *pBlkHostCtx)
 
 static void virtioHostBlkNotify(struct virtioHostQueue *pQueue)
 {
+	struct virtioBlkHostCtx *vBlkHostCtx;
 	int ret;
-	struct virtioDispObj *pDispObj;
 
 	if (!pQueue) {
 		VIRTIO_BLK_DEV_DBG(VIRTIO_BLK_DEV_DBG_ERR, "null pQueue\n");
 		return;
 	}
 
-	if (pQueue->vHost && (pQueue->vHost->status & VIRTIO_CONFIG_S_DRIVER_OK) != 0) {
-		pthread_mutex_lock(&vBlkHostDrv.dispMtx);
-		if (!TAILQ_EMPTY(&vBlkHostDrv.dispFreeQ)) {
-			pDispObj = TAILQ_FIRST(&vBlkHostDrv.dispFreeQ);
-			if (!pDispObj) {
+	if (pQueue->vHost) {
+		if ((pQueue->vHost->status & VIRTIO_CONFIG_S_DRIVER_OK) != 0) {
+			vBlkHostCtx = (struct virtioBlkHostCtx *)pQueue->vHost;
+                	ret = sem_post(&vBlkHostCtx->work_sem);
+			if (ret)
 				VIRTIO_BLK_DEV_DBG(VIRTIO_BLK_DEV_DBG_ERR,
-						"failed to get dispatch object from free queue\n");
-				pthread_mutex_unlock(&vBlkHostDrv.dispMtx);
-				return;
-			}
-
-			/* Disable kick from FE driver during handling requests */
-			virtioHostQueueIntrDisable(pQueue);
-
-			TAILQ_REMOVE(&vBlkHostDrv.dispFreeQ, pDispObj, link);
-			pDispObj->pQueue = pQueue;
-			TAILQ_INSERT_TAIL(&vBlkHostDrv.dispBusyQ, pDispObj, link);
-
-			pthread_cond_signal(&vBlkHostDrv.dispCond);
-		} else {
-			VIRTIO_BLK_DEV_DBG(VIRTIO_BLK_DEV_DBG_ERR,
-					"No object in dispatch free queue\n");
+						"failed to sem_post work_sem: %s\n", strerror(errno));
 		}
-		pthread_mutex_unlock(&vBlkHostDrv.dispMtx);
 	}
 
 	return;

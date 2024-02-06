@@ -1,0 +1,15 @@
+[Unit]
+Description=VirtIO Userspace
+After=network.target
+
+[Service]
+Type=exec
+Restart=on-failure
+RestartSec=5s
+
+#ExecStartPre=@BINDIR@/virtio-userspace-preset.sh
+ExecStart=@BASE_BINDIR@/sh -c '@BASE_SBINDIR@/modprobe virtio-uio && @BINDIR@/uio_test'
+ExecStop=@BASE_BINDIR@/sh -c '@BASE_SBINDIR@/modprobe -r virtio-uio'
+
+[Install]
+WantedBy=multi-user.target

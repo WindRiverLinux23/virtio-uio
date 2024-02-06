@@ -63,15 +63,6 @@ Here are the basic instructions for using the wr-virtio-uio layer:
 
     echo "USER_CLASSES += \" virtio-userspace\"" >> conf/local.conf
 
- 5.1 Add a custome recipy for liburing needed by userspace backend driver to conf/local.conf
-
-    echo "CUSTOMER_RECIPES:openembedded-layer += 'liburing'" >> conf/local.conf
-
-    Note: if build fails with repository fetch, run manually:
-    LANG=C git -c gc.autoDetach=false -c core.pager=cat clone --bare \
-        --mirror https://github.com/axboe/liburing.git \
-        <Linux build directory>/build-xilinx-zynqmp-initramfs/downloads/git2/github.com.axboe.liburing.git --progress
-
  6. Build:
 
     export LANG=en_US.UTF-8
