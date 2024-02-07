@@ -25,13 +25,33 @@ A program that tests VirtIO userspace subsystem
 #include <semaphore.h>
 #include <sys/mman.h>
 #include <sys/ioctl.h>
+#include <syslog.h>
 
 #include "virtio_host_parser.h"
 #include "uio-virtio.h"
 #include "virtioHostLib.h"
 
+/* local defines */
+
+#undef DEBUG
+#ifdef DEBUG
+#define log_info(fmt, ...)				\
+	printf("%d: %s() " fmt, __LINE__, __func__,	\
+	       ##__VA_ARGS__);				\
+	fflush(stdout)
+#define log_err log_info
+#else
+#define log_info(fmt, ...)					\
+	syslog(LOG_INFO, "%d: %s() " fmt, __LINE__, __func__,	\
+	       ##__VA_ARGS__)
+#define log_err(fmt, ...)					\
+	syslog(LOG_ERR, "%d: %s() " fmt, __LINE__, __func__,	\
+	       ##__VA_ARGS__)
+#endif
+
 /* local variables */
 
+const char* virtio_service_name = "virtio-userspace";
 const char* virtio_ctrl_device = "/dev/virtio_ctrl";
 const char* uio_device = "/dev/uio0";
 
@@ -43,7 +63,6 @@ extern int virtioHostEventHandler(struct virtio_device* vdev);
 static void signal_handler(int signo)
 {
 	is_running = 0;
-	signal(signo, signal_handler);
 }
 
 static int virtioIntProcess(struct virtio_device* vdev, int uio_fd)
@@ -53,10 +72,24 @@ static int virtioIntProcess(struct virtio_device* vdev, int uio_fd)
 	uint32_t nints = 0; /* number of interrupts */
 	struct timeval tv = { 5, 0 };
 	int err;
+	struct sigaction saint;
+	struct sigaction saterm;
 
 	is_running = 1;
-	signal(SIGINT, signal_handler);
-	signal(SIGTERM, signal_handler);
+	memset(&saint, 0, sizeof(struct sigaction));
+	saint.sa_handler = &signal_handler;
+
+	if (sigaction(SIGINT, &saint, NULL) != 0) {
+		log_err("SIGINT setting error: %s\n", strerror(errno));
+		return -1;
+	}
+	memset(&saterm, 0, sizeof(struct sigaction));
+	saterm.sa_handler = &signal_handler;
+
+	if (sigaction(SIGINT, &saterm, NULL) != 0) {
+		log_err("SIGTERM setting error: %s\n", strerror(errno));
+		return -1;
+	}
 
 	/* Tell the remote device, we're ready */
         virtio_add_status(vdev, VIRTIO_CONFIG_S_DRIVER_OK);
@@ -64,7 +97,7 @@ static int virtioIntProcess(struct virtio_device* vdev, int uio_fd)
 	while (is_running) {
 		/* Eenable the interrupt */
 		if (write(uio_fd, &enable, sizeof(enable)) < 0) {
-			printf("Interrupt enable error: %s\n",
+			log_err("Interrupt enable error: %s\n",
 			       strerror(errno));
 			break;
 		}
@@ -76,13 +109,13 @@ static int virtioIntProcess(struct virtio_device* vdev, int uio_fd)
                 if (err == 0) {
                         continue;
                 } else if (err < 0) {
-                        printf("Error\n");
+                        log_err("Error\n");
                         break;
                 } else {
                         if (uio.revents & POLLIN) {
                                 err = read(uio_fd, &nints, sizeof(nints));
                                 if (err < 0) {
-                                        printf("Read error %s\n",
+					log_err("Read error %s\n",
                                                strerror(errno));
 					continue;
                                 }
@@ -96,7 +129,7 @@ static int virtioIntProcess(struct virtio_device* vdev, int uio_fd)
 
 	enable = 0;
         if (write(uio_fd, &enable, sizeof(enable)) < 0) {
-                printf("Interrupt disable error: %s\n", strerror(errno));
+                log_err("Interrupt disable error: %s\n", strerror(errno));
 	}
 	return err;
 }
@@ -118,25 +151,34 @@ int main (void)
 	int ctrl_fd;
         void* addr;
 
-	printf("VirtIO test starts\n");
+#ifndef DEBUG
+	if (daemon(0, 1) != 0) {
+		printf("VirtIO test daemon failed %s\n",
+		       strerror(errno));
+		return -1;
+	}
+	openlog(virtio_service_name, LOG_CONS, LOG_DAEMON);
+#endif
+
+	log_info("VirtIO userspace starts\n");
 
 	/*
          * Open VirtIO control device and add get region size
          */
 
-        printf("Open %s and add VirtIO memory region\n",
+	log_info("Open %s and add VirtIO memory region\n",
 	       virtioDevice.virtio_ctrl_device);
         ctrl_fd = open(virtioDevice.virtio_ctrl_device, O_RDWR | O_SYNC);
         if (ctrl_fd < 0) {
-                printf("Control device open error: %s\n", strerror(errno));
+                log_err("Control device open error: %s\n", strerror(errno));
                 return -1;
         }
         err = ioctl(ctrl_fd, VHOST_VIRTIO_GET_REGION, &region);
         if (err == 0) {
-                printf("Region exists: addr: 0x%lx, size 0x%lx, offset 0x%X\n",
+                log_info("Region exists: addr: 0x%lx, size 0x%lx, offset 0x%X\n",
                        region.addr, region.size, region.offs);
         } else {
-		printf("getting VirtIO memory region failed: %s\n",
+		log_err("getting VirtIO memory region failed: %s\n",
 		       strerror(errno));
 		return -1;
 	}
@@ -148,13 +190,13 @@ int main (void)
 
         uio_fd = open(virtioDevice.uio_device, O_RDWR | O_SYNC);
         if (uio_fd < 0) {
-                printf("Device open error %s\n", strerror(errno));
+                log_err("Device open error %s\n", strerror(errno));
                 return -1;
         }
 
         addr = mmap(NULL, region.size, PROT_READ | PROT_WRITE, MAP_SHARED, uio_fd, 0);
         if (addr == MAP_FAILED) {
-                printf("Memory map error %s\n", strerror(errno));
+                log_err("Memory map error %s\n", strerror(errno));
                 return -1;
         }
 	close(uio_fd);
@@ -165,15 +207,18 @@ int main (void)
 
 	virtioDevice.dev.base = addr;
 	if (vsm_init(&virtioDevice) != 0) {
-		printf("VSM initialization FAILED\n");
+		log_err("VSM initialization FAILED\n");
 		return -1;
 	}
 
-	printf("VirtIO initialization complete. 5 seconds for an int\n");
+	log_info("VirtIO initialization complete\n");
         uio_fd = open(virtioDevice.uio_device, O_RDWR | O_SYNC);
 	virtioIntProcess(&virtioDevice, uio_fd);
 	close(uio_fd);
 	vsm_deinit(&virtioDevice);
-	printf("VirtIO test complete\n");
+	log_info("VirtIO userspace stopped\n");
+#ifndef DEBUG
+	closelog();
+#endif
 	return 0;
 }

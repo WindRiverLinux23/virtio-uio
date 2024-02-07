@@ -35,6 +35,7 @@ logic, such as configuration handling or queue handling.
 #include <linux/virtio_mmio.h>
 #include "virtioHostLib.h"
 #include "virtio_host_parser.h"
+#include <syslog.h>
 
 /* defines */
 #define VIRTIO_STATUS_RESET       0x00u //zhe not defined in linux?
@@ -64,9 +65,15 @@ static uint32_t virtioHostDbgMask = VIRTIO_HOST_DBG_ERR |
 		}							\
 	}								\
 while ((false));
+#define log_err(fmt, ...)					\
+	VIRTIO_HOST_DBG_MSG(VIRTIO_HOST_DBG_ERR, fmt,		\
+			   ##__VA_ARGS__)
 #else
 #undef VIRTIO_HOST_DBG_MSG
 #define VIRTIO_HOST_DBG_MSG(...)
+#define log_err(fmt, ...)					\
+	syslog(LOG_ERR, "%d: %s() " fmt, __LINE__, __func__,	\
+	       ##__VA_ARGS__)
 #endif  /* VIRTIO_HOST_DBG */
 
 #define VIRTIO_MMIO_MODERN_REG_VER          0x2
@@ -123,23 +130,20 @@ static VIRTIO_HOST_CFG_INFO virtioHostCfgInfo = {
 int virtioHostParserConnect(VIRTIO_HOST_CFG_PARSER *pCfgParser)
 {
 	if (!pCfgParser) {
-	    VIRTIO_HOST_DBG_MSG(VIRTIO_HOST_DBG_ERR, "null pCfgParser\n");
+	    log_err( "null pCfgParser\n");
 		errno = EINVAL;
 		return -1;
 	}
 
 	if (!pCfgParser->name || !pCfgParser->parserFn ||
 	    !pCfgParser->freeDevCfgsFn || !pCfgParser->freeDevMapsFn) {
-		VIRTIO_HOST_DBG_MSG (VIRTIO_HOST_DBG_ERR,
-				     "invalid pCfgParser\n");
+		log_err("invalid pCfgParser\n");
 		errno = EINVAL;
 		return -1;
 	}
 
 	if (pVirtioHostParser) {
-		VIRTIO_HOST_DBG_MSG (VIRTIO_HOST_DBG_ERR,
-				     "virtio host parser "
-				     "already exists\n");
+		log_err("virtio host parser already exists\n");
 		return -1;
 	}
 
@@ -171,22 +175,19 @@ static int virtioHostCfgParse(char *pBuf, size_t bufLen,
 		VIRTIO_HOST_CFG_INFO *pVhostCfg)
 {
 	if (!pBuf || (bufLen == 0) || !pVhostCfg) {
-		VIRTIO_HOST_DBG_MSG(VIRTIO_HOST_DBG_ERR,
-				"input invalid!\n");
+		log_err("input invalid!\n");
 	        errno = EINVAL;
 		return -1;
 	}
 
 	if (!pVirtioHostParser || !pVirtioHostParser->parserFn) {
-		VIRTIO_HOST_DBG_MSG(VIRTIO_HOST_DBG_ERR,
-				"parser interface not connected!\n");
+		log_err("parser interface not connected!\n");
 		errno = ENOTSUP;
 		return -1;
 	}
 
 	if (pVirtioHostParser->parserFn(pBuf, bufLen, pVhostCfg) != 0) {
-		VIRTIO_HOST_DBG_MSG(VIRTIO_HOST_DBG_ERR,
-				    "configuration can't be resolved!\n");
+		log_err("configuration can't be resolved!\n");
 		return -1;
 	}
 
@@ -198,8 +199,7 @@ int virtioHostCfgFree(void)
 	VIRTIO_HOST_DBG_MSG(VIRTIO_HOST_DBG_INFO, "start\n");
 	if (!pVirtioHostParser || !pVirtioHostParser->freeDevCfgsFn ||
 			!pVirtioHostParser->freeDevMapsFn) {
-		VIRTIO_HOST_DBG_MSG(VIRTIO_HOST_DBG_ERR,
-				"parser interface not connected\n");
+		log_err("parser interface not connected\n");
 		errno = EINVAL;
 		return -1;
 	}
@@ -323,8 +323,7 @@ int virtioHostHpaConvertToCpa(PHYS_ADDR hostPhysAddr, PHYS_ADDR *pCpuAddr)
 	}
 
 	if (!pgVirtioHostVsm) {
-		VIRTIO_HOST_DBG_MSG (VIRTIO_HOST_DBG_ERR,
-				"virtio VSM is not initialized!\n");
+		log_err("virtio VSM is not initialized!\n");
 		errno = ENOTSUP;
 		return -1;
 	}
@@ -352,8 +351,7 @@ int virtioHostHpaConvertToCpa(PHYS_ADDR hostPhysAddr, PHYS_ADDR *pCpuAddr)
 		}
 	}
 
-	VIRTIO_HOST_DBG_MSG (VIRTIO_HOST_DBG_ERR,
-			     "the address not in any guest map region!\n");
+	log_err("the address not in any guest map region!\n");
 
 	errno = ENOENT;
 	return -1;
@@ -377,15 +375,13 @@ int virtioHostHpaConvertToCpa(PHYS_ADDR hostPhysAddr, PHYS_ADDR *pCpuAddr)
 int virtioHostDrvRegister(struct virtioHostDrvInfo *vHostdrvInfo)
 {
 	if (!vHostdrvInfo) {
-		VIRTIO_HOST_DBG_MSG (VIRTIO_HOST_DBG_ERR,
-				     "vHostdrvInfo is NULL!\n");
+		log_err("vHostdrvInfo is NULL!\n");
 		errno = EINVAL;
 		return -1;
 	}
 
 	if (!vHostdrvInfo->create) {
-		VIRTIO_HOST_DBG_MSG (VIRTIO_HOST_DBG_ERR,
-				     "the create RTN is NULL\n");
+		log_err("the create RTN is NULL\n");
 	        errno = EINVAL;
 		return -1;
 	}
@@ -417,8 +413,7 @@ static void virtioHostDevicesCreate(struct virtioHostDev *pHostDev,
 	int ret;
 
 	if (TAILQ_EMPTY(&vHostCreateRtnList)) {
-		VIRTIO_HOST_DBG_MSG (VIRTIO_HOST_DBG_ERR,
-				     "no back-end driver registered!\n");
+		log_err("no back-end driver registered!\n");
 		return;
 	}
 
@@ -439,17 +434,15 @@ static void virtioHostDevicesCreate(struct virtioHostDev *pHostDev,
 		}
 
 		if (!match) {
-			VIRTIO_HOST_DBG_MSG(VIRTIO_HOST_DBG_ERR,
-					    "%d is unsupported virtio device\n",
-					    pHostDev[i].typeId);
+			log_err("%d is unsupported virtio device\n",
+				pHostDev[i].typeId);
 			continue;
 		}
 
 		ret = pHostDrvInfo->create(&pHostDev[i]);
 		if (ret) {
-			VIRTIO_HOST_DBG_MSG(VIRTIO_HOST_DBG_ERR,
-					    "failed to initialize %d\n",
-					    ret);
+			log_err("failed to initialize %d\n",
+				ret);
 			continue;
 		}
 	}
@@ -495,8 +488,7 @@ void virtioHostDevicesInit(void)
 	VIRTIO_HOST_DBG_MSG(VIRTIO_HOST_DBG_INFO, "start\n");
 
 	if (!pgVirtioHostVsm) {
-		VIRTIO_HOST_DBG_MSG (VIRTIO_HOST_DBG_ERR,
-				     "VSM driver not initialized!\n");
+		log_err("VSM driver not initialized!\n");
 		return;
 	}
 
@@ -505,24 +497,21 @@ void virtioHostDevicesInit(void)
 	/* get VSM share memory region */
 
 	if (virtioHostVsmShmRegionGet(pgVirtioHostVsm, &vShmRegion) != 0) {
-		VIRTIO_HOST_DBG_MSG (VIRTIO_HOST_DBG_ERR,
-				     "unable to get the shared memory %s\n",
-				     strerror(errno));
+		log_err("unable to get the shared memory %s\n",
+			strerror(errno));
 		return;
 	}
 
 	shmBuf = (const char *)vShmRegion.vaddr;
 	dataLen = strnlen(shmBuf, (size_t)vShmRegion.region.len); //zhe
 	if (dataLen == 0) {
-		VIRTIO_HOST_DBG_MSG (VIRTIO_HOST_DBG_ERR,
-				     "share memory is empty!\n");
+		log_err("share memory is empty!\n");
 		virtioHostVsmShmRegionRelease(pgVirtioHostVsm, &vShmRegion);
 		return;
 	}
 	yamlBuf = malloc(dataLen + 1);
 	if (yamlBuf == NULL) {
-		VIRTIO_HOST_DBG_MSG (VIRTIO_HOST_DBG_ERR,
-				     "config buffer allocation error\n");
+		log_err("config buffer allocation error\n");
 		return;
 	}
 	for (i = 0; i < dataLen; i++) {
@@ -537,9 +526,8 @@ void virtioHostDevicesInit(void)
 	/* parse the virtio host devices configuration */
 	r = virtioHostCfgParse(yamlBuf, dataLen, &virtioHostCfgInfo);
 	if (r != 0) {
-		VIRTIO_HOST_DBG_MSG (VIRTIO_HOST_DBG_ERR,
-				     "virtio host configuraton can't "
-				     "be parsed!\n");
+		log_err("virtio host configuraton can't "
+			"be parsed!\n");
 		free(yamlBuf);
 		return;
 	}
@@ -583,14 +571,13 @@ int virtioHostVsmRegister(struct virtioHostVsm *pVirtioHostVsm)
 	VIRTIO_HOST_DBG_MSG(VIRTIO_HOST_DBG_INFO, "start\n");
 
 	if (!pVirtioHostVsm) {
-		VIRTIO_HOST_DBG_MSG (VIRTIO_HOST_DBG_ERR, "input invalid!\n");
+		log_err("input invalid!\n");
 	        errno = EINVAL;
 		return -1;
 	}
 
 	if (pgVirtioHostVsm) {
-		VIRTIO_HOST_DBG_MSG (VIRTIO_HOST_DBG_ERR,
-				     "VSM is already registered!\n");
+		log_err("VSM is already registered!\n");
 		errno = EEXIST;
 		return -1;
 	}
@@ -629,8 +616,7 @@ int virtioHostVsmReqKick(struct virtioHost *vHost, uint32_t queueId)
 	int i;
 
 	if (!vHost || !vHost->pQueue || queueId >= vHost->queueMax) {
-		VIRTIO_HOST_DBG_MSG(VIRTIO_HOST_DBG_ERR,
-				    "invalid parameters!\n");
+		log_err("invalid parameters!\n");
 		errno = EINVAL;
 		return -1;
 	}
@@ -693,8 +679,7 @@ int virtioHostVsmReqRead(struct virtioHost *vHost,
 	int ret = 0;
 
 	if (!vHost || !pValue) {
-		VIRTIO_HOST_DBG_MSG (VIRTIO_HOST_DBG_ERR,
-				     "invalid input parameter\n");
+		log_err("invalid input parameter\n");
 		errno = EINVAL;
 		return -1;
 	}
@@ -798,9 +783,7 @@ int virtioHostVsmReqRead(struct virtioHost *vHost,
 		case VIRTIO_MMIO_CONFIG_GENERATION:
 			break;
 		default:
-			VIRTIO_HOST_DBG_MSG(VIRTIO_HOST_DBG_ERR,
-					    "unsupport address %08lx\n",
-					    address);
+			log_err("unsupport address %08lx\n", address);
 			ret = ENOTSUP;
 			break;
 	}
@@ -839,8 +822,7 @@ int virtioHostVsmReqWrite(struct virtioHost *vHost,
 	int ret = 0;
 
 	if (vHost == NULL) {
-		VIRTIO_HOST_DBG_MSG (VIRTIO_HOST_DBG_ERR,
-				     "invalid input parameter!\n");
+		log_err("invalid input parameter!\n");
 		errno = EINVAL;
 		return -1;
 	}
@@ -943,9 +925,8 @@ int virtioHostVsmReqWrite(struct virtioHost *vHost,
 			vHost->shmSel = value;
 			break;
 		default:
-			VIRTIO_HOST_DBG_MSG (VIRTIO_HOST_DBG_ERR,
-					     "unsupport address %08lx\n",
-					     address);
+			log_err("unsupport address %08lx\n",
+				address);
 			ret = ENOTSUP;
 			break;
 	}
@@ -979,8 +960,7 @@ int virtioHostVsmReqReset(struct virtioHost *vHost)
 	uint32_t vq;
 
 	if (!vHost) {
-		VIRTIO_HOST_DBG_MSG (VIRTIO_HOST_DBG_ERR,
-				     "invalid input parameter\n");
+		log_err("invalid input parameter\n");
 		errno = EINVAL;
 		return -1;
 	}
@@ -1055,25 +1035,22 @@ int virtioHostCreate
 
 	if (!vHost || !pHostOps || !devFeature ||
 			queueMax == 0 || queueMaxNum == 0) {
-		VIRTIO_HOST_DBG_MSG (VIRTIO_HOST_DBG_ERR,
-				     "invalid input parameter\n");
+		log_err("invalid input parameter\n");
 		errno = EINVAL;
 		return -1;
 	}
 
 	/* check if VSM has been registered or not */
 	if (!pgVirtioHostVsm || !pgVirtioHostVsm->vsmOps.getQueue) {
-		VIRTIO_HOST_DBG_MSG (VIRTIO_HOST_DBG_ERR,
-				"VSM not found\n");
+		log_err("VSM not found\n");
 		errno = EEXIST;
 		return -1;
 	}
 
 	if (*devFeature & (1ULL << VIRTIO_F_RING_PACKED)) {
-		VIRTIO_HOST_DBG_MSG (VIRTIO_HOST_DBG_ERR,
-				     "packed virtqueue is "
-				     "not supported devFeature:0x%lx\n",
-				     *devFeature);
+		log_err("packed virtqueue is "
+			"not supported devFeature:0x%lx\n",
+			*devFeature);
 		/* FIXME: add support for packed virtqueues */
 		errno = ENOTSUP;
 		return -1;
@@ -1082,8 +1059,7 @@ int virtioHostCreate
 	pVsmQueue = pgVirtioHostVsm->vsmOps.getQueue(pgVirtioHostVsm->vsmId,
 			vHost->channelId);
 	if (!pVsmQueue) {
-		VIRTIO_HOST_DBG_MSG (VIRTIO_HOST_DBG_ERR,
-				"failed to get the channel\n");
+		log_err("failed to get the channel\n");
 		errno = ENOENT;
 		return -1;
 	}
@@ -1094,8 +1070,7 @@ int virtioHostCreate
 
 	if (virtioHostMapSetup(pgVirtioHostVsm->vsmId,
 			       vHost->pMaps) != 0) {
-		VIRTIO_HOST_DBG_MSG (VIRTIO_HOST_DBG_ERR,
-				     "failed to get map\n");
+		log_err("failed to get map\n");
 		ret = ENOSPC;
 		goto failed;
 	}
@@ -1109,8 +1084,7 @@ int virtioHostCreate
 	vHost->pHostQueueReg = (struct virtioHostQueueReg *)zmalloc(
 		queueMax * sizeof (struct virtioHostQueueReg));
 	if (vHost->pHostQueueReg == NULL) {
-		VIRTIO_HOST_DBG_MSG (VIRTIO_HOST_DBG_ERR,
-				     "queue allocation failed\n");
+		log_err("queue allocation failed\n");
 		ret = ENOMEM;
 		goto failed;
 	}
@@ -1119,9 +1093,7 @@ int virtioHostCreate
 		vHost->pHostShmReg = (struct virtioHostShmReg *)zmalloc(
 			shmMax * sizeof (struct virtioHostShmReg));
 		if (vHost->pHostShmReg == NULL) {
-			VIRTIO_HOST_DBG_MSG (VIRTIO_HOST_DBG_ERR,
-					     "failed to allocate "
-					     "memory mappings\n");
+			log_err("failed to allocate memory mappings\n");
 			ret = ENOMEM;
 			goto failed;
 		}
@@ -1141,8 +1113,7 @@ int virtioHostCreate
 	vHost->pQueue = (struct virtioHostQueue *)zmalloc(
 		queueMax * sizeof (struct virtioHostQueue));
 	if (!vHost->pQueue) {
-		VIRTIO_HOST_DBG_MSG (VIRTIO_HOST_DBG_ERR,
-				     "failed to allocate queue\n");
+		log_err("failed to allocate queue\n");
 		ret = ENOSPC;
 		goto failed;
 	}
@@ -1154,8 +1125,7 @@ int virtioHostCreate
 	pthread_mutex_unlock(&vHostDeviceLock);
 
 	if (pgVirtioHostVsm->vsmOps.init(pVsmQueue, vHost) != 0) {
-		VIRTIO_HOST_DBG_MSG (VIRTIO_HOST_DBG_ERR,
-				"failed to initialize channel\n");
+		log_err("failed to initialize channel\n");
 		ret = EACCES;
 		goto failed;
 	}
@@ -1204,9 +1174,7 @@ void virtioHostRelease(struct virtioHost *vHost)
 				ret = munmap(vHost->pMaps->entry[i].hvaddr,
 					     vHost->pMaps->entry[i].size);
 				if (ret != 0) {
-					VIRTIO_HOST_DBG_MSG(
-						VIRTIO_HOST_DBG_ERR,
-						"memory unmap failed %s\n",
+					log_err("memory unmap failed %s\n",
 						strerror(errno));
 					return;
 				}
@@ -1236,8 +1204,7 @@ static int virtioHostMapSetup(VIRTIO_VSM_ID vsmId, struct virtioMap *pMap)
 	int ctrl_fd;
 
 	if (!pMap) {
-		VIRTIO_HOST_DBG_MSG(VIRTIO_HOST_DBG_ERR,
-				"invalid input parameter\n");
+		log_err("invalid input parameter\n");
 		errno = EINVAL;
 		return -1;
 	}
@@ -1253,17 +1220,15 @@ static int virtioHostMapSetup(VIRTIO_VSM_ID vsmId, struct virtioMap *pMap)
 
 	ctrl_fd = virtioVsmGetCtrl(vsmId);
 	if (ctrl_fd < 0) {
-		VIRTIO_HOST_DBG_MSG (VIRTIO_HOST_DBG_ERR,
-				     "failed to get control file: %s\n",
-				     strerror(errno));
+		log_err("failed to get control file: %s\n",
+			strerror(errno));
 		errno = ENOSPC;
 		return -1;
 	}
 	uio_fd = virtioVsmGetUIO(vsmId);
 	if (uio_fd < 0) {
-		VIRTIO_HOST_DBG_MSG (VIRTIO_HOST_DBG_ERR,
-				     "failed to get UIO file: %s\n",
-				     strerror(errno));
+		log_err("failed to get UIO file: %s\n",
+			strerror(errno));
 		close(ctrl_fd);
 		errno = ENOSPC;
 		return -1;
@@ -1285,10 +1250,9 @@ static int virtioHostMapSetup(VIRTIO_VSM_ID vsmId, struct virtioMap *pMap)
 				      alignedSize,
 				      &pMap->entry[i].offset);
 		if (ret != 0) {
-			VIRTIO_HOST_DBG_MSG(VIRTIO_HOST_DBG_ERR,
-					    "failed to create region 0x%lx: %s\n",
-					    pMap->entry[i].hpaddr,
-					    strerror(errno));
+			log_err("failed to create region 0x%lx: %s\n",
+				pMap->entry[i].hpaddr,
+				strerror(errno));
 			errno = ENOSPC;
 			ret = -1;
 			break;
@@ -1298,10 +1262,9 @@ static int virtioHostMapSetup(VIRTIO_VSM_ID vsmId, struct virtioMap *pMap)
 					     MAP_SHARED, uio_fd,
 					     pMap->entry[i].offset);
 		if (pMap->entry[i].hvaddr == MAP_FAILED) {
-			VIRTIO_HOST_DBG_MSG(VIRTIO_HOST_DBG_ERR,
-					    "failed to map region 0x%lx: %s\n",
-					    pMap->entry[i].hpaddr,
-					    strerror(errno));
+			log_err("failed to map region 0x%lx: %s\n",
+				pMap->entry[i].hpaddr,
+				strerror(errno));
 			errno = ENOSPC;
 			ret = -1;
 			break;
@@ -1353,8 +1316,7 @@ uint64_t vritioHostHasFeature(struct virtioHost *vHost, uint64_t feature)
 	uint64_t drvFeature;
 
 	if (!vHost) {
-		VIRTIO_HOST_DBG_MSG (VIRTIO_HOST_DBG_ERR,
-				"invalid input parameter\n");
+		log_err("invalid input parameter\n");
 		errno = EINVAL;
 		return 0;
 	}
@@ -1432,8 +1394,7 @@ __virtio64 host_cpu_to_virtio64(struct virtioHost *vHost, uint64_t val)
 int virtioHostConfigNotify(struct virtioHost *vHost)
 {
 	if (vHost == NULL) {
-		VIRTIO_HOST_DBG_MSG (VIRTIO_HOST_DBG_ERR,
-				     "invalid input parameter\n");
+		log_err("invalid input parameter\n");
 		errno = EINVAL;
 		return -1;
 	}
@@ -1458,8 +1419,7 @@ int virtioHostConfigNotify(struct virtioHost *vHost)
 int virtioHostNeedReset(struct virtioHost *vHost)
 {
 	if (vHost == NULL) {
-		VIRTIO_HOST_DBG_MSG (VIRTIO_HOST_DBG_ERR,
-				     "invalid input parameter\n");
+		log_err("invalid input parameter\n");
 		errno = EINVAL;
 		return -1;
 	}
@@ -1484,8 +1444,7 @@ static int virtioHostReset(struct virtioHost *vHost)
 	uint32_t vq;
 
 	if (!vHost || !vHost->pHostQueueReg) {
-		VIRTIO_HOST_DBG_MSG (VIRTIO_HOST_DBG_ERR,
-				     "invalid input parametr\n");
+		log_err("invalid input parametr\n");
 		errno = EINVAL;
 		return -1;
 	}
@@ -1538,8 +1497,7 @@ int virtioHostTranslate(struct virtioHost *vHost,
 	uint32_t i;
 
 	if (!vHost || !hvaddr) {
-		VIRTIO_HOST_DBG_MSG(VIRTIO_HOST_DBG_ERR,
-				    "invalid input parameter\n");
+		log_err("invalid input parameter\n");
 		errno = EINVAL;
 		return -1;
 	}
@@ -1557,9 +1515,8 @@ int virtioHostTranslate(struct virtioHost *vHost,
 		}
 	}
 
-	VIRTIO_HOST_DBG_MSG(VIRTIO_HOST_DBG_ERR,
-			    "address 0x%lx is out of boundary!\n",
-			    gpaddr);
+	log_err("address 0x%lx is out of boundary!\n",
+		gpaddr);
 	errno = ENOENT;
 	return -1;
 }
@@ -1592,8 +1549,7 @@ static int virtioHostNotify(struct virtioHost *vHost)
 {
 	if (!vHost || !vHost->pVsmOps || !vHost->pVsmOps->notify ||
 			!vHost->pVsmQueue) {
-		VIRTIO_HOST_DBG_MSG (VIRTIO_HOST_DBG_ERR,
-				"invalid input parameter\n");
+		log_err("invalid input parameter\n");
 		errno = EINVAL;
 		return -1;
 	}
@@ -1628,8 +1584,7 @@ static int virtioHostQueueEnable(struct virtioHost *vHost,
 	VIRT_ADDR               hvaddr;
 
 	if (!vHost) {
-		VIRTIO_HOST_DBG_MSG (VIRTIO_HOST_DBG_ERR,
-				"invalid input parameter\n");
+		log_err("invalid input parameter\n");
 		errno = EINVAL;
 		return -1;
 	}
@@ -1700,8 +1655,7 @@ static int virtioHostSetStatus(struct virtioHost *vHost,
 			       uint32_t status)
 {
 	if (!vHost || !vHost->pHostOps) {
-		VIRTIO_HOST_DBG_MSG (VIRTIO_HOST_DBG_ERR,
-				     "invalid input parameter\n");
+		log_err("invalid input parameter\n");
 		errno = EINVAL;
 		return -1;
 	}
@@ -1753,8 +1707,7 @@ bool virtioHostQueueHasBuf(struct virtioHostQueue *pQueue)
 	uint16_t availIdx;
 
 	if (!virtioHostQueueReady(pQueue)) {
-		VIRTIO_HOST_DBG_MSG(VIRTIO_HOST_DBG_ERR,
-				    "virtual queue is not ready\n");
+		log_err("virtual queue is not ready\n");
 		return false;
 	}
 
@@ -1821,15 +1774,13 @@ int virtioHostQueueGetBuf(struct virtioHostQueue *pQueue,
 	__virtio16 *pnext;
 
 	if (!pQueue || !pIdx || !bufList|| !maxBuf) {
-		VIRTIO_HOST_DBG_MSG (VIRTIO_HOST_DBG_ERR,
-				     "invalid input parameter\n");
+		log_err("invalid input parameter\n");
 		errno = EINVAL;
 		return -1;
 	}
 
 	if (!virtioHostQueueReady(pQueue)) {
-		VIRTIO_HOST_DBG_MSG(VIRTIO_HOST_DBG_ERR,
-				    "virtual queue not ready\n");
+		log_err("virtual queue not ready\n");
 		errno = EACCES;
 		return -1;
 	}
@@ -1868,10 +1819,8 @@ int virtioHostQueueGetBuf(struct virtioHostQueue *pQueue,
 
 	for (i = 0, idx = 0; i < queueMaxNum; descIdx = host_readw(pnext), i++) {
 		if (descIdx >= queueMaxNum) {
-			VIRTIO_HOST_DBG_MSG(VIRTIO_HOST_DBG_ERR,
-					    "descriptor index %u is "
-					    "out of range\n",
-					    descIdx);
+			log_err("descriptor index %u is out of range\n",
+				descIdx);
 			return -1;
 		}
 
@@ -1896,9 +1845,7 @@ int virtioHostQueueGetBuf(struct virtioHostQueue *pQueue,
 					    pQueue->vHost,
 					    host_readq((uint64_t*)paddr)),
 				    &virtAddr)) {
-				VIRTIO_HOST_DBG_MSG(
-					VIRTIO_HOST_DBG_ERR,
-					"failed to translate address 0x%lx\n",
+				log_err("failed to translate address 0x%lx\n",
 					host_readq((uint64_t*)paddr));
 				errno = EFAULT;
 				return -1;
@@ -1919,9 +1866,8 @@ int virtioHostQueueGetBuf(struct virtioHostQueue *pQueue,
 
 		} else if (!vritioHostHasFeature(pQueue->vHost,
 						 VIRTIO_RING_F_INDIRECT_DESC)) {
-			VIRTIO_HOST_DBG_MSG (VIRTIO_HOST_DBG_ERR,
-					     "descriptor is indirect while "
-					     "host device does not support\n");
+			log_err("descriptor is indirect while "
+				"host device does not support\n");
 			errno = EFAULT;
 			return -1;
 		} else {
@@ -1941,10 +1887,9 @@ int virtioHostQueueGetBuf(struct virtioHostQueue *pQueue,
 
 			if ((len & (sizeof(struct vring_desc) - 1))
 			    || inDescNum == 0) {
-				VIRTIO_HOST_DBG_MSG(VIRTIO_HOST_DBG_ERR,
-						    "indirect descs length 0x%x "
-						    "is 0 or not aligned\n",
-						    len);
+				log_err("indirect descs length 0x%x "
+					"is 0 or not aligned\n",
+					len);
 				errno = EFAULT;
 				return -1;
 			}
@@ -1954,13 +1899,12 @@ int virtioHostQueueGetBuf(struct virtioHostQueue *pQueue,
 				    host_virtio64_to_cpu(pQueue->vHost,
 							 desc->addr),
 				    &virtAddr)) {
-				VIRTIO_HOST_DBG_MSG(VIRTIO_HOST_DBG_ERR,
-						    "failed to translate "
-						    "address 0x%llx:0x%lx\n",
-						    desc->addr,
-						    host_virtio64_to_cpu(
-							    pQueue->vHost,
-							    desc->addr));
+				log_err("failed to translate "
+					"address 0x%llx:0x%lx\n",
+					desc->addr,
+					host_virtio64_to_cpu(
+						pQueue->vHost,
+						desc->addr));
 				errno = EFAULT;
 				return -1;
 			}
@@ -1986,10 +1930,9 @@ int virtioHostQueueGetBuf(struct virtioHostQueue *pQueue,
 				inDesc->flags = host_virtio16_to_cpu(pQueue->vHost,
 								     inDesc->flags);
 				if (inDesc->flags & VRING_DESC_F_INDIRECT) {
-					VIRTIO_HOST_DBG_MSG(VIRTIO_HOST_DBG_ERR,
-							"second level indirect "
-							    "descriptor is not "
-							    "supported\n");
+					log_err("second level indirect "
+						"descriptor is not "
+						"supported\n");
 					errno = EFAULT;
 					return -1;
 				}
@@ -1998,14 +1941,13 @@ int virtioHostQueueGetBuf(struct virtioHostQueue *pQueue,
 						host_virtio64_to_cpu(pQueue->vHost,
 								     inDesc->addr),
 							&virtAddr)) {
-					VIRTIO_HOST_DBG_MSG(VIRTIO_HOST_DBG_ERR,
-							    "failed to translate "
-							    "address 0x%llx:"
-							    "0x%lx\n",
-							    inDesc->addr,
-							    host_virtio64_to_cpu(
-								    pQueue->vHost,
-								    inDesc->addr));
+					log_err("failed to translate "
+						"address 0x%llx:"
+						"0x%lx\n",
+						inDesc->addr,
+						host_virtio64_to_cpu(
+							pQueue->vHost,
+							inDesc->addr));
 					errno = EFAULT;
 					return -1;
 				}
@@ -2025,12 +1967,11 @@ int virtioHostQueueGetBuf(struct virtioHostQueue *pQueue,
 					break;
 
 				if (descIdx >= inDescNum) {
-					VIRTIO_HOST_DBG_MSG(VIRTIO_HOST_DBG_ERR,
-							    "invalid next %u > "
-							    "%u the indirect "
-							    "desc can contain\n",
-							    descIdx,
-							    inDescNum);
+					log_err("invalid next %u > "
+						"%u the indirect "
+						"desc can contain\n",
+						descIdx,
+						inDescNum);
 					errno = EFAULT;
 					return -1;
 				}
@@ -2042,10 +1983,9 @@ int virtioHostQueueGetBuf(struct virtioHostQueue *pQueue,
 		}
 
 		if (idx == maxBuf) {
-			VIRTIO_HOST_DBG_MSG(VIRTIO_HOST_DBG_ERR,
-					    "got %d buffers, no space "
-					    "to get more\n",
-					    idx);
+			log_err("got %d buffers, no space "
+				"to get more\n",
+				idx);
 			errno = ENOSPC;
 			return -1;
 		}
@@ -2075,15 +2015,13 @@ int virtioHostQueueGetBuf(struct virtioHostQueue *pQueue,
 int virtioHostQueueRetBuf(struct virtioHostQueue *pQueue)
 {
 	if (!pQueue) {
-		VIRTIO_HOST_DBG_MSG(VIRTIO_HOST_DBG_ERR,
-				    "invalid input parameter\n");
+		log_err("invalid input parameter\n");
 		errno = EINVAL;
 		return -1;
 	}
 
 	if (!virtioHostQueueReady(pQueue)) {
-		VIRTIO_HOST_DBG_MSG(VIRTIO_HOST_DBG_ERR,
-				    "virtual queue not ready\n");
+		log_err("virtual queue not ready\n");
 		return -EACCES;
 	}
 
@@ -2123,15 +2061,13 @@ int virtioHostQueueRelBuf(struct virtioHostQueue *pQueue, uint16_t descIdx,
 	__virtio16 *pidx;
 
 	if (!pQueue) {
-		VIRTIO_HOST_DBG_MSG (VIRTIO_HOST_DBG_ERR,
-				"invalid input parameter\n");
+		log_err("invalid input parameter\n");
 		errno = EINVAL;
 		return -1;
 	}
 
 	if (!virtioHostQueueReady(pQueue)) {
-		VIRTIO_HOST_DBG_MSG(VIRTIO_HOST_DBG_ERR,
-				"virtual queue not ready\n");
+		log_err("virtual queue not ready\n");
 		errno = EACCES;
 		return -1;
 	}
@@ -2197,23 +2133,20 @@ int virtioHostQueueNotify(struct virtioHostQueue *pQueue)
 	int ret = 0;
 
 	if (!pQueue) {
-		VIRTIO_HOST_DBG_MSG (VIRTIO_HOST_DBG_ERR,
-				     "invalid input parameter\n");
+		log_err("invalid input parameter\n");
 		errno = EINVAL;
 		return -1;
 	}
 
 	vHost = pQueue->vHost;
 	if (!vHost) {
-		VIRTIO_HOST_DBG_MSG (VIRTIO_HOST_DBG_ERR,
-				     "vHost is NULL\n");
+		log_err("vHost is NULL\n");
 		errno = EINVAL;
 		return -1;
 	}
 
 	if (!virtioHostQueueReady(pQueue)) {
-		VIRTIO_HOST_DBG_MSG(VIRTIO_HOST_DBG_ERR,
-				"virtual queue not ready\n");
+		log_err("virtual queue not ready\n");
 		errno = EACCES;
 		return -1;
 	}
@@ -2284,8 +2217,7 @@ int virtioHostQueueIntrEnable(struct virtioHostQueue *pQueue)
 	struct virtioHost *vHost;
 
 	if (!pQueue) {
-		VIRTIO_HOST_DBG_MSG (VIRTIO_HOST_DBG_ERR,
-				     "invalid input parameter\n");
+		log_err("invalid input parameter\n");
 		errno = EINVAL;
 		return -1;
 	}
@@ -2294,15 +2226,13 @@ int virtioHostQueueIntrEnable(struct virtioHostQueue *pQueue)
 
 	vHost = pQueue->vHost;
 	if (!vHost) {
-		VIRTIO_HOST_DBG_MSG (VIRTIO_HOST_DBG_ERR,
-				     "vHost is NULL\n");
+		log_err("vHost is NULL\n");
 		errno = EACCES;
 		return -1;
 	}
 
 	if (!virtioHostQueueReady(pQueue)) {
-		VIRTIO_HOST_DBG_MSG(VIRTIO_HOST_DBG_ERR,
-				"virtual queue not ready\n");
+		log_err("virtual queue not ready\n");
 		errno = EACCES;
 		return -1;
 	}
@@ -2343,8 +2273,7 @@ int virtioHostQueueIntrDisable(struct virtioHostQueue *pQueue)
 	struct virtioHost *vHost;
 
 	if (!pQueue) {
-		VIRTIO_HOST_DBG_MSG(VIRTIO_HOST_DBG_ERR,
-				    "null pQueue\n");
+		log_err("null pQueue\n");
 		errno = EINVAL;
 		return -1;
 	}
@@ -2353,14 +2282,13 @@ int virtioHostQueueIntrDisable(struct virtioHostQueue *pQueue)
 
 	vHost = pQueue->vHost;
 	if (!vHost) {
-		VIRTIO_HOST_DBG_MSG(VIRTIO_HOST_DBG_ERR, "%s null vHost\n",
+		log_err("%s null vHost\n",
 				__FUNCTION__);
 		return -EACCES;
 	}
 
 	if (!virtioHostQueueReady(pQueue)) {
-		VIRTIO_HOST_DBG_MSG(VIRTIO_HOST_DBG_ERR,
-				"virtual queue not ready\n");
+		log_err("virtual queue not ready\n");
 		errno = EACCES;
 		return -1;
 	}
@@ -2418,16 +2346,14 @@ int virtioHostStopThread(pthread_t thread)
 	void* pth_result;
 
 	if (res != 0) {
-		VIRTIO_HOST_DBG_MSG(VIRTIO_HOST_DBG_ERR,
-				    "Unable to cancel thread 0x%lx: %s\n",
-				    thread, strerror(errno));
+		log_err("Unable to cancel thread 0x%lx: %s\n",
+			thread, strerror(errno));
 		return -1;
 	}
 	res = pthread_join(thread, &pth_result);
 	if (res != 0 || pth_result != PTHREAD_CANCELED) {
-		VIRTIO_HOST_DBG_MSG(VIRTIO_HOST_DBG_ERR,
-				    "Unable to get cancel thread 0x%lx: %s\n",
-				    thread, strerror(errno));
+		log_err("Unable to get cancel thread 0x%lx: %s\n",
+			thread, strerror(errno));
 		return -1;
 	}
 	return 0;

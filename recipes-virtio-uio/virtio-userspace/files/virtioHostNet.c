@@ -42,6 +42,7 @@
 #include <netinet/ether.h>
 #include <netinet/ip.h>
 #include "virtioHostLib.h"
+#include <syslog.h>
 
 /*
  * Netlink headers
@@ -73,8 +74,14 @@ static uint32_t virtioNetDevDbgMask = VIRTIO_NET_DEV_DBG_ALL;
 		}							\
 	}								\
 while ((false))
+#define log_err(fmt, ...)					\
+	VIRTIO_NET_DEV_DBG(VIRTIO_NET_DEV_DBG_ERR, fmt,		\
+			   ##__VA_ARGS__)
 #else
 #define VIRTIO_NET_DEV_DBG(...)
+#define log_err(fmt, ...)					\
+	syslog(LOG_ERR, "%d: %s() " fmt, __LINE__, __func__,	\
+	       ##__VA_ARGS__)
 #endif  /* REG_MAP_DBG_ON */
 
 
@@ -211,9 +218,7 @@ void virtioHostNetDrvInit(void)
 	ret = pthread_create(&vNetHostDrv.dispThread, NULL,
 			     virtioHostNetReqDispatch, NULL);
 	if (ret) {
-		VIRTIO_NET_DEV_DBG(VIRTIO_NET_DEV_DBG_ERR,
-				   "failed to create virtio net "
-				   "host dispatch thread\n");
+		log_err("failed to create virtio net host dispatch thread\n");
 	}
 }
 
@@ -266,8 +271,7 @@ static int virtioNetParseMac(char *mac_str, uint8_t *mac_addr)
 		if (ea == NULL || ETHER_IS_MULTICAST(ea->ether_addr_octet) ||
 		    memcmp(ea->ether_addr_octet, zero_addr, ETHER_ADDR_LEN)
 				== 0) {
-			VIRTIO_NET_DEV_DBG(VIRTIO_NET_DEV_DBG_ERR,
-					"Invalid MAC %s\n", mac_str);
+			log_err("Invalid MAC %s\n", mac_str);
 			return -1;
 		}
 		memcpy(mac_addr, ea->ether_addr_octet, ETHER_ADDR_LEN);
@@ -298,22 +302,19 @@ static int virtioNetTapOpen(char *devname)
 
 	/*Check if tun/tap or macvtap interface is used */
 	if (virtioNetIsMacvtap(devname, &macvtap_index)) {
-                VIRTIO_NET_DEV_DBG(VIRTIO_NET_DEV_DBG_ERR,
-				   "Interface %s is used\n", devname);
+		log_err("Interface %s is used\n", devname);
                 return -1;
 	}
 
 	rc = snprintf(tbuf, IFNAMSIZ, "%s", "/dev/net/tun");
 	if (rc < 0 || rc >= IFNAMSIZ) {
-		VIRTIO_NET_DEV_DBG(VIRTIO_NET_DEV_DBG_ERR,
-				"Failed to set interface name %s\n", tbuf);
+		log_err("Failed to set interface name %s\n", tbuf);
 		return -1;
 	}
 
 	tunfd = open(tbuf, O_RDWR);
 	if (tunfd < 0) {
-		VIRTIO_NET_DEV_DBG(VIRTIO_NET_DEV_DBG_ERR,
-				"Failed to open interface %s\n", tbuf);
+		log_err("Failed to open interface %s\n", tbuf);
 		return -1;
 	}
 
@@ -327,9 +328,8 @@ static int virtioNetTapOpen(char *devname)
 
 	rc = ioctl(tunfd, TUNSETIFF, (void *)&ifr);
 	if (rc < 0) {
-		VIRTIO_NET_DEV_DBG(VIRTIO_NET_DEV_DBG_ERR,
-                                   "tap device %s creation failed: %s\n",
-                                   devname, strerror(errno));
+		log_err("tap device %s creation failed: %s\n",
+			devname, strerror(errno));
 		close(tunfd);
 		return -1;
 	}
@@ -358,22 +358,19 @@ static int virtioHostNetCreateWithTap(struct virtioNetHostDev *pNetHostDev)
 
 	ret = snprintf(buf, IFNAMSIZ, "%s", pNetBeDevArgs->tapType);
 	if (ret < 0 || ret >= IFNAMSIZ) {
-		VIRTIO_NET_DEV_DBG(VIRTIO_NET_DEV_DBG_ERR,
-				"failed to form net interface name(%d)\n", ret);
+		log_err("failed to form net interface name(%d)\n", ret);
 		return -1;
 	}
 
 	pNetHostDev->tapfd = virtioNetTapOpen(buf);
 	if (pNetHostDev->tapfd == -1) {
-		VIRTIO_NET_DEV_DBG(VIRTIO_NET_DEV_DBG_ERR,
-				"failed to open net interface %s\n", buf);
+		log_err("failed to open net interface %s\n", buf);
 		return -1;
 	}
 
 	if (ioctl(pNetHostDev->tapfd, FIONBIO, &opt) < 0) {
-		VIRTIO_NET_DEV_DBG(VIRTIO_NET_DEV_DBG_ERR,
-				   "failed to open net interface to "
-				   "nonblocking mode\n");
+		log_err("failed to open net interface to "
+			"nonblocking mode\n");
 		return -1;
 	}
 
@@ -392,9 +389,8 @@ static int virtioNetlinkConnect(void)
 
         netlink_fd = socket(AF_NETLINK, SOCK_RAW | SOCK_CLOEXEC, NETLINK_ROUTE);
         if (netlink_fd == -1) {
-                VIRTIO_NET_DEV_DBG(VIRTIO_NET_DEV_DBG_ERR,
-                                   "Netlink socket open error: %s\n",
-                                   strerror(errno));
+		log_err("Netlink socket open error: %s\n",
+			strerror(errno));
                 return -1;
         }
 
@@ -406,9 +402,8 @@ static int virtioNetlinkConnect(void)
 
 		close(netlink_fd);
                 errno = bind_errno;
-                VIRTIO_NET_DEV_DBG(VIRTIO_NET_DEV_DBG_ERR,
-                                   "Netlink socket bind error: %s\n",
-                                   strerror(errno));
+		log_err("Netlink socket bind error: %s\n",
+			strerror(errno));
                 return -1;
         }
         return netlink_fd;
@@ -450,9 +445,8 @@ static int virtioNetlinkSetAddrIpv4(int netlink_fd, const char *iface_name,
 	inet_pton(AF_INET, address, RTA_DATA(request_attr));
 
 	if (send(netlink_fd, &request, request.header.nlmsg_len, 0) == -1) {
-		VIRTIO_NET_DEV_DBG(VIRTIO_NET_DEV_DBG_ERR,
-				   "interface %s configuration error: %s\n",
-				   iface_name, strerror(errno));
+		log_err("interface %s configuration error: %s\n",
+			iface_name, strerror(errno));
 		return -1;
 	}
 	return 0;
@@ -474,9 +468,8 @@ static int virtioNetlinkUp(int netlink_fd, const char *iface_name)
 	request.content.ifi_change = 1;
 
 	if (send(netlink_fd, &request, request.header.nlmsg_len, 0) == -1) {
-		VIRTIO_NET_DEV_DBG(VIRTIO_NET_DEV_DBG_ERR,
-				   "interface %s up error: %s\n",
-				   iface_name, strerror(errno));
+		log_err("interface %s up error: %s\n",
+			iface_name, strerror(errno));
 		return -1;
 	}
 	return 0;
@@ -503,8 +496,7 @@ static int virtioHostNetBeDevCreate(struct virtioNetHostDev *pNetHostDev)
 
 	ret = virtioHostNetCreateWithTap(pNetHostDev);
 	if (ret) {
-		VIRTIO_NET_DEV_DBG(VIRTIO_NET_DEV_DBG_ERR,
-				"failed to create back-end device(%d)\n", ret);
+		log_err("failed to create back-end device(%d)\n", ret);
 		return ret;
 	}
 
@@ -583,9 +575,8 @@ static int virtioHostNetDevCreate(struct virtioNetHostDev *pNetHostDev)
 			0, NULL,
 			&virtioNetHostOps);
 	if (ret) {
-		VIRTIO_NET_DEV_DBG(VIRTIO_NET_DEV_DBG_ERR,
-				"virtio net host context creating failed %d\n",
-				ret);
+		log_err("virtio net host context creating failed %d\n",
+			ret);
 		goto err;
 	}
 
@@ -596,9 +587,8 @@ static int virtioHostNetDevCreate(struct virtioNetHostDev *pNetHostDev)
 
 	pNetHostDev->epollfd = epoll_create1(0);
 	if (pNetHostDev->epollfd < 0) {
-		VIRTIO_NET_DEV_DBG(VIRTIO_NET_DEV_DBG_ERR,
-				   "failed to create epoll fd(%d): %s\n",
-				   pNetHostDev->epollfd, strerror(errno));
+		log_err("failed to create epoll fd(%d): %s\n",
+			pNetHostDev->epollfd, strerror(errno));
 		goto err;
 	}
 	pNetHostDev->ee.data.fd = pNetHostDev->tapfd;
@@ -606,42 +596,37 @@ static int virtioHostNetDevCreate(struct virtioNetHostDev *pNetHostDev)
 	ret = epoll_ctl(pNetHostDev->epollfd, EPOLL_CTL_ADD,
 			pNetHostDev->tapfd, &pNetHostDev->ee);
 	if (ret) {
-		VIRTIO_NET_DEV_DBG(VIRTIO_NET_DEV_DBG_ERR,
-				   "failed to set up epoll fd(%d): %s\n",
-				   ret, strerror(errno));
+		log_err("failed to set up epoll fd(%d): %s\n",
+			ret, strerror(errno));
 		goto err;
 	}
 
 	ret = sem_init(&pNetHostCtx->tx_sem, 0, 0);
 	if (ret) {
-		VIRTIO_NET_DEV_DBG(VIRTIO_NET_DEV_DBG_ERR,
-				   "Failed to create tx sem(%d): %s\n",
-				   ret, strerror(errno));
+		log_err("Failed to create tx sem(%d): %s\n",
+			ret, strerror(errno));
 		goto err;
 	}
 	ret = sem_init(&pNetHostCtx->rx_sem, 0, 0);
 	if (ret) {
-		VIRTIO_NET_DEV_DBG(VIRTIO_NET_DEV_DBG_ERR,
-				   "Failed to create rx sem(%d): %s\n",
-				   ret, strerror(errno));
+		log_err("Failed to create rx sem(%d): %s\n",
+			ret, strerror(errno));
 		goto err;
 	}
 
 	ret = pthread_create(&pNetHostCtx->tx_thread, NULL,
 			     virtioHostNetTxHandle, pNetHostCtx);
 	if (ret) {
-		VIRTIO_NET_DEV_DBG(VIRTIO_NET_DEV_DBG_ERR,
-				   "failed to create tx worker thread(%d): %s\n",
-				   ret, strerror(errno));
+		log_err("failed to create tx worker thread(%d): %s\n",
+			ret, strerror(errno));
 		goto err;
 	}
 
 	ret = pthread_create(&pNetHostCtx->rx_thread, NULL,
 			     virtioHostNetRxHandle, pNetHostCtx);
 	if (ret) {
-		VIRTIO_NET_DEV_DBG(VIRTIO_NET_DEV_DBG_ERR,
-				   "failed to create rx worker thread(%d): %s\n",
-				   ret, strerror(errno));
+		log_err("failed to create rx worker thread(%d): %s\n",
+			ret, strerror(errno));
 		goto err;
 	}
 
@@ -675,8 +660,7 @@ static int virtioHostNetParseArgs(struct virtioNetBeDevArgs *pNetBeDevArgs,
 
 	nopt = xopts = strdup(pArgs);
 	if (!nopt) {
-		VIRTIO_NET_DEV_DBG(VIRTIO_NET_DEV_DBG_ERR,
-				"failed to strdup pArgs\n");
+		log_err("failed to strdup pArgs\n");
 		return -EINVAL;
 	}
 
@@ -687,9 +671,8 @@ static int virtioHostNetParseArgs(struct virtioNetBeDevArgs *pNetBeDevArgs,
 				strncpy(pNetBeDevArgs->tapType, nopt + 4,
 					strlen(nopt + 4));
 			} else {
-				VIRTIO_NET_DEV_DBG(VIRTIO_NET_DEV_DBG_ERR,
-						   "device option must start "
-						   "with tap=\n");
+				log_err("device option must start "
+					"with tap=\n");
 			}
 			continue;
 		} else if (!strncmp(cp, "mac=", 4)) {
@@ -748,17 +731,15 @@ static int virtioHostNetCreate(struct virtioHostDev *pHostDev)
 	VIRTIO_NET_DEV_DBG(VIRTIO_NET_DEV_DBG_INFO, "start\n");
 
 	if (!pHostDev) {
-		VIRTIO_NET_DEV_DBG(VIRTIO_NET_DEV_DBG_ERR,
-				"pChannel is NULL!\n");
+		log_err("pChannel is NULL!\n");
 		return -EINVAL;
 	}
 
 	/* the virtio channel number is always one */
 	if (pHostDev->channelNum > 1) {
-		VIRTIO_NET_DEV_DBG(VIRTIO_NET_DEV_DBG_ERR,
-				   "channel number is %d "
-				   "only one channel is supported\n",
-				   pHostDev->channelNum);
+		log_err("channel number is %d "
+			"only one channel is supported\n",
+			pHostDev->channelNum);
 		return -EINVAL;
 	}
 
@@ -777,9 +758,8 @@ static int virtioHostNetCreate(struct virtioHostDev *pHostDev)
 			pHostDev->channels[0].pMap->entry->size);
 
 	if (vNetHostDrv.vNetHostDevNum == VIRTIO_NET_HOST_DEV_MAX) {
-		VIRTIO_NET_DEV_DBG(VIRTIO_NET_DEV_DBG_ERR,
-				"no more than %d net devices can be created\n",
-				VIRTIO_NET_HOST_DEV_MAX);
+		log_err("no more than %d net devices can be created\n",
+			VIRTIO_NET_HOST_DEV_MAX);
 		return -ENOENT;
 	}
 
@@ -789,9 +769,8 @@ static int virtioHostNetCreate(struct virtioHostDev *pHostDev)
 
 	pNetHostDev = calloc(1, sizeof(struct virtioNetHostDev));
 	if (!pNetHostDev) {
-		VIRTIO_NET_DEV_DBG(VIRTIO_NET_DEV_DBG_ERR,
-				   "failed to allocate memory for "
-				   "virtio net host device failed\n");
+		log_err("failed to allocate memory for "
+			"virtio net host device failed\n");
 		return -ENOMEM;
 	}
 
@@ -877,9 +856,7 @@ static void* virtioHostNetReqDispatch(void *my_unused)
 			if (pDispObj) {
 				TAILQ_REMOVE(&vNetHostDrv.dispBusyQ, pDispObj, link);
 			} else {
-				VIRTIO_NET_DEV_DBG(
-					VIRTIO_NET_DEV_DBG_ERR,
-					"failed to get dispatch object "
+				log_err("failed to get dispatch object "
 					"from busy queue\n");
 			}
 
@@ -894,9 +871,7 @@ static void* virtioHostNetReqDispatch(void *my_unused)
 				    &pDispObj->pQueue->vHost->pQueue[VIRTIO_NET_TXQ]) {
 					ret = sem_post(&pNetHostCtx->tx_sem);
 					if (ret) {
-						VIRTIO_NET_DEV_DBG(
-							VIRTIO_NET_DEV_DBG_ERR,
-							"failed to sem_post "
+						log_err("failed to sem_post "
 							"tx_sem: %s\n",
 							strerror(errno));
 					}
@@ -905,17 +880,13 @@ static void* virtioHostNetReqDispatch(void *my_unused)
 				    &pDispObj->pQueue->vHost->pQueue[VIRTIO_NET_RXQ]) {
 					ret = sem_post(&pNetHostCtx->rx_sem);
 					if (ret) {
-						VIRTIO_NET_DEV_DBG(
-							VIRTIO_NET_DEV_DBG_ERR,
-							"failed to sem_post "
+						log_err("failed to sem_post "
 							"tx_sem: %s\n",
 							strerror(errno));
 					}
 				}
 			} else {
-				VIRTIO_NET_DEV_DBG(
-					VIRTIO_NET_DEV_DBG_ERR,
-					"failed to get virtqueue from busy object\n");
+				log_err("failed to get virtqueue from busy object\n");
 			}
 
 			pthread_mutex_lock(&vNetHostDrv.dispMtx);
@@ -1007,9 +978,7 @@ static void* virtioHostNetTxHandle(void *pNetHostCtx)
         while(1) {
                 ret = sem_wait(&vNetHostCtx->tx_sem);
                 if (ret < 0) {
-			VIRTIO_NET_DEV_DBG(
-				VIRTIO_NET_DEV_DBG_ERR,
-				"failed to sem_wait tx_sem: %s\n",
+			log_err("failed to sem_wait tx_sem: %s\n",
 				strerror(errno));
                         continue;
                 }
@@ -1029,8 +998,7 @@ static void* virtioHostNetTxHandle(void *pNetHostCtx)
 			}
 
 			if (n < 0) {
-				VIRTIO_NET_DEV_DBG(VIRTIO_NET_DEV_DBG_ERR,
-						"failed to get buffer(%d)\n", n);
+				log_err("failed to get buffer(%d)\n", n);
 				break;
 			}
 
@@ -1038,9 +1006,7 @@ static void* virtioHostNetTxHandle(void *pNetHostCtx)
 		        rbuffs = txIovTrim(bufList, &n,
 					   VIRTIO_HDR_LEN + 2);
 			if (rbuffs == NULL) {
-				VIRTIO_NET_DEV_DBG(
-					VIRTIO_NET_DEV_DBG_ERR,
-					"received buffers are smaller than "
+				log_err("received buffers are smaller than "
 					"VirtIO header\n");
 				break;
 			}
@@ -1064,9 +1030,8 @@ static void* virtioHostNetTxHandle(void *pNetHostCtx)
 			ret = writev(vNetHostDev->tapfd, iov,
 				     len < ETH_ZLEN ? n : n + 1);
 			if (ret < 0) {
-				VIRTIO_NET_DEV_DBG(VIRTIO_NET_DEV_DBG_ERR,
-						   "failed to writev(%s)\n",
-						   strerror(ret));
+				log_err("failed to writev(%s)\n",
+					strerror(ret));
 				(void) virtioHostQueueRetBuf(txQueue);
 				break;
 			}
@@ -1125,9 +1090,7 @@ static void* virtioHostNetRxHandle(void *pNetHostCtx)
         while(1) {
                 ret = sem_wait(&vNetHostCtx->rx_sem);
                 if (ret < 0) {
-			VIRTIO_NET_DEV_DBG(
-				VIRTIO_NET_DEV_DBG_ERR,
-				"failed to sem_wait rx_sem: %s\n",
+			log_err("failed to sem_wait rx_sem: %s\n",
 				strerror(errno));
                         continue;
                 }
@@ -1135,9 +1098,8 @@ static void* virtioHostNetRxHandle(void *pNetHostCtx)
 			ret = epoll_wait(vNetHostDev->epollfd, eventlist,
 					 64, -1);
 			if (ret == -1 && errno != EINTR) {
-				VIRTIO_NET_DEV_DBG(VIRTIO_NET_DEV_DBG_ERR,
-						   "failed to epoll wait(%d)\n",
-						   ret);
+				log_err("failed to epoll wait(%d)\n",
+					ret);
 				continue;
 			}
 
@@ -1158,9 +1120,7 @@ static void* virtioHostNetRxHandle(void *pNetHostCtx)
 				(void)virtioHostQueueNotify(rxQueue);
 				break;
 			} else if (n < 0) {
-				VIRTIO_NET_DEV_DBG(
-					VIRTIO_NET_DEV_DBG_ERR,
-					"failed to get buffer(%d)\n", n);
+				log_err("failed to get buffer(%d)\n", n);
 				break;
 			} else {
 
@@ -1181,9 +1141,7 @@ static void* virtioHostNetRxHandle(void *pNetHostCtx)
 				}
 				ret = readv(vNetHostDev->tapfd, iov, n);
 				if (ret < 0) {
-					VIRTIO_NET_DEV_DBG(
-						VIRTIO_NET_DEV_DBG_ERR,
-						"failed to readv(%s)\n",
+					log_err("failed to readv(%s)\n",
 						strerror(ret));
 					(void) virtioHostQueueRetBuf(rxQueue);
 				} else {
@@ -1223,7 +1181,7 @@ static void virtioHostNetNotify(struct virtioHostQueue *pQueue)
 	struct virtioDispObj *pDispObj;
 
 	if (!pQueue) {
-		VIRTIO_NET_DEV_DBG(VIRTIO_NET_DEV_DBG_ERR, "null pQueue\n");
+		log_err("null pQueue\n");
 		return;
 	}
 
@@ -1235,9 +1193,7 @@ static void virtioHostNetNotify(struct virtioHostQueue *pQueue)
 		if (!TAILQ_EMPTY(&vNetHostDrv.dispFreeQ)) {
 			pDispObj = TAILQ_FIRST(&vNetHostDrv.dispFreeQ);
 			if (!pDispObj) {
-				VIRTIO_NET_DEV_DBG(
-					VIRTIO_NET_DEV_DBG_ERR,
-					"failed to get dispatch object from "
+				log_err("failed to get dispatch object from "
 					"free queue\n");
 				pthread_mutex_unlock(&vNetHostDrv.dispMtx);
 				return;
@@ -1252,8 +1208,7 @@ static void virtioHostNetNotify(struct virtioHostQueue *pQueue)
 
 			pthread_cond_signal(&vNetHostDrv.dispCond);
 		} else {
-			VIRTIO_NET_DEV_DBG(VIRTIO_NET_DEV_DBG_ERR,
-					"No object in dispatch free queue\n");
+			log_err("No object in dispatch free queue\n");
 		}
 		pthread_mutex_unlock(&vNetHostDrv.dispMtx);
 	}
@@ -1280,8 +1235,7 @@ static int virtioHostNetReset(struct virtioHost *vHost)
 
 	vNetHostCtx = (struct virtioNetHostCtx *)vHost;
 	if (!vNetHostCtx) {
-		VIRTIO_NET_DEV_DBG(VIRTIO_NET_DEV_DBG_ERR,
-				"null vNetHostCtx\n");
+		log_err("null vNetHostCtx\n");
 		return -1;
 	}
 	vNetHostCtx->cfg.status = 0;
@@ -1310,7 +1264,7 @@ static int virtioHostNetCfgRead(struct virtioHost *vHost, uint64_t address,
 	uint8_t *cfgAddr;
 
 	if (!vHost) {
-		VIRTIO_NET_DEV_DBG(VIRTIO_NET_DEV_DBG_ERR, "null vHost\n");
+		log_err("null vHost\n");
 		return -EINVAL;
 	}
 
@@ -1343,13 +1297,12 @@ static int virtioHostNetCfgWrite(struct virtioHost *vHost, uint64_t address,
 	uint8_t *cfgAddr;
 
 	if (!vHost) {
-		VIRTIO_NET_DEV_DBG(VIRTIO_NET_DEV_DBG_ERR, "null vHost\n");
+		log_err("null vHost\n");
 		return -EINVAL;
 	}
 
-	VIRTIO_NET_DEV_DBG(VIRTIO_NET_DEV_DBG_ERR,
-			"failed to write to read-only register %ld\n",
-			host_virtio64_to_cpu(vHost, address));
+	log_err("failed to write to read-only register %ld\n",
+		host_virtio64_to_cpu(vHost, address));
 
 	/* No writiable options so far */
 	return -EINVAL;
@@ -1393,7 +1346,7 @@ static int virtioHostNetSetStatus(struct virtioHost* vHost, uint32_t status)
 {
 	struct virtioHostQueue* pQueue;
 	if (!vHost) {
-		VIRTIO_NET_DEV_DBG(VIRTIO_NET_DEV_DBG_ERR, "null vHost\n");
+		log_err("null vHost\n");
 		return -EINVAL;
 	}
 	VIRTIO_NET_DEV_DBG(VIRTIO_NET_DEV_DBG_INFO,

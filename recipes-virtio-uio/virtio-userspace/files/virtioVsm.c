@@ -42,6 +42,7 @@ only MMIO device is supported.
 #include <sys/mman.h>
 #include <sys/queue.h>
 #include "virtioHostLib.h"
+#include <syslog.h>
 
 #undef VIRTIO_VSM_DBG
 #ifdef VIRTIO_VSM_DBG
@@ -67,9 +68,15 @@ static uint32_t virtioVsmDbgMask = VIRTIO_VSM_DBG_ERR | VIRTIO_VSM_DBG_INFO;
                 }                                                       \
         }                                                               \
 while ((false));
+#define log_err(fmt, ...)					\
+	VIRTIO_VSM_DBG_MSG(VIRTIO_VSM_DBG_ERR, fmt,		\
+			   ##__VA_ARGS__)
 #else
 #undef VIRTIO_VSM_DBG_MSG
 #define VIRTIO_VSM_DBG_MSG(...)
+#define log_err(fmt, ...)					\
+	syslog(LOG_ERR, "%d: %s() " fmt, __LINE__, __func__,	\
+	       ##__VA_ARGS__)
 #endif  /* VIRTIO_VSM_DBG */
 
 /* feature */
@@ -212,8 +219,7 @@ static void* virtioVsmCompHandle(void *arg)
 	while(1) {
 		rc = sem_wait(&pDrvCtrl->comp_sem);
 		if (rc < 0) {
-			VIRTIO_VSM_DBG_MSG(VIRTIO_VSM_DBG_ERR,
-					"failed to sem_wait\n");
+			log_err("failed to sem_wait\n");
 			continue;
 		}
 
@@ -259,8 +265,7 @@ again:
 
 checkend:
 			if (!found) {
-				VIRTIO_VSM_DBG_MSG(VIRTIO_VSM_DBG_ERR,
-						"failed to find the queue\n");
+				log_err("failed to find the queue\n");
 				continue;
 			}
 
@@ -273,10 +278,8 @@ checkend:
 			rc = virtqueueAddBuffer(pReqQueue, bufList, 0, 1,
 						(void *)pReq);
 			if (rc) {
-				VIRTIO_VSM_DBG_MSG(VIRTIO_VSM_DBG_ERR,
-						"failed to return buf to "
-						   "request queue %s\n",
-						   strerror(errno));
+				log_err("failed to return buf to request "
+					"queue %s\n", strerror(errno));
 			}
 
 			/* kick remote device if needed */
@@ -291,8 +294,7 @@ checkend:
 				if (flags & VRING_AVAIL_F_REQ_INTERRUPT)
 					virtqueueKick(pReqQueue);
 			} else {
-				VIRTIO_VSM_DBG_MSG(VIRTIO_VSM_DBG_ERR,
-						"failed to get vring\n");
+				log_err("failed to get vring\n");
 			}
 		}
 
@@ -312,8 +314,7 @@ static void* virtioVsmIrqHandle(void *arg)
 	while(1) {
 		rc = sem_wait(&pDrvCtrl->irq_sem);
 		if (rc < 0) {
-			VIRTIO_VSM_DBG_MSG(VIRTIO_VSM_DBG_ERR,
-					"failed to sem_wait\n");
+			log_err("failed to sem_wait\n");
 			continue;
 		}
 
@@ -369,15 +370,13 @@ static void virtioVsmQueueDone(struct virtqueue *pQueue)
 			"start\n");
 
 	if (!pQueue) {
-		VIRTIO_VSM_DBG_MSG(VIRTIO_VSM_DBG_ERR,
-				"null pQueue\n");
+		log_err("null pQueue\n");
 		return;
 	}
 
 	pDrvCtrl = pQueue->vdev->priv;
 	if (!pDrvCtrl) {
-		VIRTIO_VSM_DBG_MSG(VIRTIO_VSM_DBG_ERR,
-				"null pDrvCtrl\n");
+		log_err("null pDrvCtrl\n");
 		return;
 	}
 
@@ -410,8 +409,7 @@ static void virtioVsmQueueDone(struct virtqueue *pQueue)
 		}
 
 		if (queueId == pDrvCtrl->reqQueueNum) {
-			VIRTIO_VSM_DBG_MSG(VIRTIO_VSM_DBG_ERR,
-					"pVsmQueue not found\n");
+			log_err("pVsmQueue not found\n");
 			return;
 		}
 
@@ -433,8 +431,7 @@ static void virtioVsmQueueDone(struct virtqueue *pQueue)
 
 		rc = sem_post(sem);
 		if (rc)
-			VIRTIO_VSM_DBG_MSG(VIRTIO_VSM_DBG_ERR,
-					"failed to sem_post: %s\n", strerror(errno));
+			log_err("failed to sem_post: %s\n", strerror(errno));
 	}
 
 	VIRTIO_VSM_DBG_MSG(VIRTIO_VSM_DBG_INFO, "done\n");
@@ -460,8 +457,7 @@ static void* virtioVsmReqHandle(void *arg)
 	while(1) {
 		rc = sem_wait(&pVsmQueue->req_sem);
 		if (rc < 0) {
-			VIRTIO_VSM_DBG_MSG(VIRTIO_VSM_DBG_ERR,
-					"failed to sem_wait\n");
+			log_err("failed to sem_wait\n");
 			continue;
 		}
 
@@ -473,14 +469,12 @@ static void* virtioVsmReqHandle(void *arg)
 				(unsigned long)pVsmQueue->vHost);
 
 		if (!pVsmQueue->vHost) {
-			VIRTIO_VSM_DBG_MSG(VIRTIO_VSM_DBG_ERR,
-					"null pVsmQueue->vHost\n");
+			log_err("null pVsmQueue->vHost\n");
 			return NULL;
 		}
 
 		if (!pVsmQueue->pReqQueue) {
-			VIRTIO_VSM_DBG_MSG(VIRTIO_VSM_DBG_ERR,
-					"null pVsmQueue->pReqQueue\n");
+			log_err("null pVsmQueue->pReqQueue\n");
 			return NULL;
 		}
 
@@ -559,8 +553,7 @@ again:
 				else
 					pReq->status = VIRTIO_VSM_S_IOERR;
 			} else {
-				VIRTIO_VSM_DBG_MSG(VIRTIO_VSM_DBG_ERR,
-						"not supported request\n");
+				log_err("not supported request\n");
 				pReq->status = VIRTIO_VSM_S_UNSUPP;
 			}
 
@@ -587,8 +580,7 @@ again:
 								"complete queue is full, drain it\n");
 						sem_post(&pDrvCtrl->comp_sem);
 					} else {
-						VIRTIO_VSM_DBG_MSG(VIRTIO_VSM_DBG_ERR,
-								   "failed to move sync request to complete queue: %s\n",
+						log_err("failed to move sync request to complete queue: %s\n",
 								   strerror(errno));
 					}
 				}
@@ -604,9 +596,7 @@ again:
 							bufList, 1, 0,
 							(void *)pReq);
 				if (rc) {
-					VIRTIO_VSM_DBG_MSG(
-						VIRTIO_VSM_DBG_ERR,
-						"failed to return buf "
+					log_err("failed to return buf "
 						"to request queue %s\n",
 						strerror(errno));
 				}
@@ -626,8 +616,7 @@ again:
 						virtqueueKick(pReqQueue);
 					}
 				} else {
-					VIRTIO_VSM_DBG_MSG(VIRTIO_VSM_DBG_ERR,
-							"failed to get vring\n");
+					log_err("failed to get vring\n");
 				}
 			}
 		}
@@ -644,20 +633,17 @@ static int virtioVsmQueueInit(struct virtioVsmQueue *pVsmQueue, struct virtioHos
 			"start\n");
 
 	if (!pVsmQueue) {
-		VIRTIO_VSM_DBG_MSG(VIRTIO_VSM_DBG_ERR,
-				"null pVsmQueue\n");
+		log_err("null pVsmQueue\n");
 		return -EINVAL;
 	}
 
 	if (!pVsmQueue->pDrvCtrl) {
-		VIRTIO_VSM_DBG_MSG(VIRTIO_VSM_DBG_ERR,
-				"null pVsmQueue->pDrvCtrl\n");
+		log_err("null pVsmQueue->pDrvCtrl\n");
 		return -EINVAL;
 	}
 
 	if (!vHost) {
-		VIRTIO_VSM_DBG_MSG(VIRTIO_VSM_DBG_ERR,
-				"null vHost\n");
+		log_err("null vHost\n");
 		return -EINVAL;
 	}
 
@@ -702,9 +688,7 @@ static struct virtioVsmQueue *virtioVsmGetQueue(struct virtioVsm *pVsm, uint32_t
 		}
 
 	if (!found) {
-		VIRTIO_VSM_DBG_MSG(VIRTIO_VSM_DBG_ERR,
-				"invalid channel ID (%d)\n",
-				channelId);
+		log_err("invalid channel ID (%d)\n", channelId);
 		return NULL;
 	}
 
@@ -736,8 +720,7 @@ static int virtioVsmNotify(struct virtioVsmQueue *pVsmQueue,
 	pIrqQueue = pDrvCtrl->pQueue[VIRTIO_VSM_IRQ_QUEUE];
 
 	if (pIrqQueue->num_free == 0)
-		VIRTIO_VSM_DBG_MSG(VIRTIO_VSM_DBG_ERR,
-				"no irq resource available\n");
+		log_err("no irq resource available\n");
 
 	irq = &pDrvCtrl->pIrq[pDrvCtrl->irqProd];
 
@@ -760,9 +743,7 @@ static int virtioVsmNotify(struct virtioVsmQueue *pVsmQueue,
 				1, 0,
 				(void *)irq);
 	if (rc) {
-		VIRTIO_VSM_DBG_MSG(VIRTIO_VSM_DBG_ERR,
-				"virtqueueAddBuffer failed %d\n",
-				rc);
+		log_err("virtqueueAddBuffer failed %d\n", rc);
 		pthread_mutex_unlock(&pDrvCtrl->irq_lock);
 		return rc;
 	}
@@ -801,20 +782,17 @@ virtioGetShmRegionInternal(struct virtioVsm *pVsm,
 	int ctrl_fd; /* control device file descriptor */
 
 	if (pVsm == NULL || vregion == NULL) {
-		VIRTIO_VSM_DBG_MSG(VIRTIO_VSM_DBG_ERR,
-				   "invalid input parameters\n");
+		log_err("invalid input parameters\n");
 		errno = EINVAL;
 		return false;
 	}
 	if (pVsm->vdev == NULL) {
-		VIRTIO_VSM_DBG_MSG(VIRTIO_VSM_DBG_ERR,
-				   "VSM virtio device not initialized\n");
+		log_err("VSM virtio device not initialized\n");
 		errno = EINVAL;
 		return false;
 	}
 	if (pVsm->vdev->virtio_ctrl_device == NULL) {
-		VIRTIO_VSM_DBG_MSG(VIRTIO_VSM_DBG_ERR,
-				   "VSM virtio control device name is NULL\n");
+		log_err("VSM virtio control device name is NULL\n");
 		errno = EINVAL;
 		return false;
 	}
@@ -822,9 +800,8 @@ virtioGetShmRegionInternal(struct virtioVsm *pVsm,
 			   "Obtaining %d memory region\n", region.indx);
 	ctrl_fd = open(pVsm->vdev->virtio_ctrl_device, O_RDWR | O_SYNC);
 	if (ctrl_fd < 0) {
-		VIRTIO_VSM_DBG_MSG(VIRTIO_VSM_DBG_ERR,
-				   "opening control device failed: %s\n",
-				   strerror(errno));
+		log_err("opening control device failed: %s\n",
+			strerror(errno));
 		return false;
 	}
 	err = ioctl(ctrl_fd, VHOST_VIRTIO_GET_REGION, &region);
@@ -860,20 +837,17 @@ static int virtioVsmShmRegionGet(struct virtioVsm *pVsm,
 	int uio_fd;
 
 	if (!pVsm || !pVsmRegion) {
-		VIRTIO_VSM_DBG_MSG(VIRTIO_VSM_DBG_ERR,
-				"invalid input parameters\n");
+		log_err("invalid input parameters\n");
 		errno = EINVAL;
 		return -1;
 	}
 	if (pVsm->vdev == NULL) {
-		VIRTIO_VSM_DBG_MSG(VIRTIO_VSM_DBG_ERR,
-				   "VSM virtio device not initialized\n");
+		log_err("VSM virtio device not initialized\n");
 		errno = EINVAL;
 		return false;
 	}
 	if (pVsm->vdev->uio_device == NULL) {
-		VIRTIO_VSM_DBG_MSG(VIRTIO_VSM_DBG_ERR,
-				   "VSM virtio UIO device name is NULL\n");
+		log_err("VSM virtio UIO device name is NULL\n");
 		errno = EINVAL;
 		return false;
 	}
@@ -883,16 +857,13 @@ static int virtioVsmShmRegionGet(struct virtioVsm *pVsm,
 
 	if (!virtioGetShmRegionInternal(pVsm, &(pVsmRegion->region),
 					VIRTIO_VSM_CFG_REGION)) {
-		VIRTIO_VSM_DBG_MSG(VIRTIO_VSM_DBG_ERR,
-				"virtio_get_shm_region failed\n");
+		log_err("virtio_get_shm_region failed\n");
 		errno = ENOMEM;
 		return -1;
 	}
 	uio_fd = open(pVsm->vdev->uio_device, O_RDWR | O_SYNC);
 	if (uio_fd < 0) {
-		VIRTIO_VSM_DBG_MSG(VIRTIO_VSM_DBG_ERR,
-				   "UIO device error: %s\n",
-				   strerror(errno));
+		log_err("UIO device error: %s\n", strerror(errno));
 		return -1;
 	}
 	pVsmRegion->vaddr = mmap(NULL, pVsmRegion->region.len,
@@ -900,8 +871,7 @@ static int virtioVsmShmRegionGet(struct virtioVsm *pVsm,
 				 MAP_SHARED, uio_fd,
 				 pVsmRegion->region.offset);
 	if (pVsmRegion->vaddr == MAP_FAILED) {
-		VIRTIO_VSM_DBG_MSG(VIRTIO_VSM_DBG_ERR,
-				   "memory map failed\n");
+		log_err("memory map failed\n");
 		close(uio_fd);
 		errno = ENOSPC;
 		return -1;
@@ -948,8 +918,7 @@ static int init_vq(struct virtioVsm *pDrvCtrl)
 	pDrvCtrl->pVirtqueueInfo = zmalloc(pDrvCtrl->queueNum *
 					    sizeof(struct virtqueueInfo));
 	if (pDrvCtrl->pVirtqueueInfo == NULL) {
-		VIRTIO_VSM_DBG_MSG (VIRTIO_VSM_DBG_ERR,
-                           "virtio queue info mem alloc failed\n");
+		log_err("virtio queue info mem alloc failed\n");
 		return -1;
         }
 
@@ -982,9 +951,8 @@ static int init_vq(struct virtioVsm *pDrvCtrl)
 					   pDrvCtrl->vdev->nVqs);
 	if (pDrvCtrl->vdev->queues == NULL ||
 	    pDrvCtrl->vdev->ringAddr == NULL) {
-		VIRTIO_VSM_DBG_MSG (VIRTIO_VSM_DBG_ERR,
-				    "device virtqueue and vring "
-				    "pointers setup failed\n");
+		log_err("device virtqueue and vring "
+			"pointers setup failed\n");
 		return -1;
 	}
 
@@ -992,14 +960,13 @@ static int init_vq(struct virtioVsm *pDrvCtrl)
 	for (queueId = 0; queueId < pDrvCtrl->queueNum; queueId++) {
 		if (setup_vq(pDrvCtrl->vdev, queueId,
 			     &pDrvCtrl->pVirtqueueInfo[queueId]) != 0) {
-			VIRTIO_VSM_DBG_MSG(VIRTIO_VSM_DBG_ERR,
-					   "virtqueue %d setup FAILED\n",
-					   queueId);
+			log_err("virtqueue %d setup FAILED\n",
+				queueId);
 			break;
 		}
 	}
 	if (queueId != pDrvCtrl->queueNum) {
-		VIRTIO_VSM_DBG_MSG(VIRTIO_VSM_DBG_ERR, "failed\n");
+		log_err("failed\n");
 		return -1;
 	}
 
@@ -1026,8 +993,7 @@ static int virtioGetChannelMax(struct virtio_device *vdev,
         struct virtioVsmConfig* cfg;
 
         if (vdev == NULL || vdev->dev.base == NULL || channelMax == NULL) {
-                VIRTIO_VSM_DBG_MSG(VIRTIO_VSM_DBG_ERR,
-                                   "invalid input parameter\n");
+		log_err("invalid input parameter\n");
                 errno = EINVAL;
                 return -1;
         }
@@ -1051,15 +1017,16 @@ int vsm_init(struct virtio_device *vdev)
 	VIRTIO_VSM_DBG_MSG(VIRTIO_VSM_DBG_INFO, "virtvsm_probe start\n");
 
 	if (virtioHostVsmDev.vsmId) {
-		VIRTIO_VSM_DBG_MSG(VIRTIO_VSM_DBG_ERR,
-				"virtioHostVsmDev.vsmId is not null\n");
+		log_err("virtioHostVsmDev.vsmId is not null\n");
 		return -EINVAL;
 	}
 
 	if (!vdev) {
-		VIRTIO_VSM_DBG_MSG(VIRTIO_VSM_DBG_ERR, "vdev is null\n");
+		log_err("vdev is null\n");
 		return -EINVAL;
 	}
+
+	virtioDevReset(vdev);
 
 	/* Set up virtual device */
 	virtioDevInit(vdev);
@@ -1076,8 +1043,7 @@ int vsm_init(struct virtio_device *vdev)
 	pDrvCtrl = calloc(sizeof(*pDrvCtrl) +
 			queueNum * sizeof(struct virtioVsmQueue), 1);
 	if (!pDrvCtrl) {
-		VIRTIO_VSM_DBG_MSG(VIRTIO_VSM_DBG_ERR,
-				   "calloc virtioVsm failed\n");
+		log_err("calloc virtioVsm failed\n");
 		goto failed;
 	}
 
@@ -1087,39 +1053,35 @@ int vsm_init(struct virtio_device *vdev)
 
 	rc = sem_init(&pDrvCtrl->comp_sem, 0, 0);
 	if (rc) {
-		VIRTIO_VSM_DBG_MSG(VIRTIO_VSM_DBG_ERR,
-				   "Failed to create VSM complete "
-				   "queue sem (%s)\n",
-				   strerror(errno));
+		log_err("Failed to create VSM complete "
+			"queue sem (%s)\n",
+			strerror(errno));
 		goto failed;
 	}
 
 	rc = pthread_create(&pDrvCtrl->comp_thread, NULL,
 			    virtioVsmCompHandle, pDrvCtrl);
 	if (rc) {
-		VIRTIO_VSM_DBG_MSG(VIRTIO_VSM_DBG_ERR,
-				   "Failed to create VSM complete "
-				   "queue thread (%s)\n",
-				   strerror(errno));
+		log_err("Failed to create VSM complete "
+			"queue thread (%s)\n",
+			strerror(errno));
 		goto failed;
 	}
 
 	rc = sem_init(&pDrvCtrl->irq_sem, 0, 0);
 	if (rc) {
-		VIRTIO_VSM_DBG_MSG(VIRTIO_VSM_DBG_ERR,
-				   "Failed to create VSM irq "
-				   "queue sem (%s)\n",
-				   strerror(errno));
+		log_err("Failed to create VSM irq "
+			"queue sem (%s)\n",
+			strerror(errno));
 		goto failed;
 	}
 
 	rc = pthread_create(&pDrvCtrl->irq_thread, NULL,
 			    virtioVsmIrqHandle, pDrvCtrl);
 	if (rc) {
-		VIRTIO_VSM_DBG_MSG(VIRTIO_VSM_DBG_ERR,
-				   "Failed to create VSM irq queue "
-				   "thread (%s)\n",
-				   strerror(errno));
+		log_err("Failed to create VSM irq queue "
+			"thread (%s)\n",
+			strerror(errno));
 		goto failed;
 	}
 
@@ -1182,10 +1144,9 @@ int vsm_init(struct virtio_device *vdev)
 		pVsmQueue->req = (struct virtioVsmReq *)calloc(num,
 				sizeof(struct virtioVsmReq));
 		if (!pVsmQueue->req) {
-			VIRTIO_VSM_DBG_MSG(VIRTIO_VSM_DBG_ERR,
-					   "calloc buffer for request "
-					   "queue[%d] failed\n",
-					   queueId);
+			log_err("calloc buffer for request "
+				"queue[%d] failed\n",
+				queueId);
 			goto failed;
 		}
 
@@ -1202,9 +1163,8 @@ int vsm_init(struct virtio_device *vdev)
 						bufList, 0, 1,
 						(void *)reqAddr);
 			if (rc) {
-				VIRTIO_VSM_DBG_MSG(VIRTIO_VSM_DBG_ERR,
-						   "virtqueueAddBuffer failed %d\n",
-						   rc);
+				log_err("virtqueueAddBuffer failed %d\n",
+					rc);
 				goto failed;
 			}
 
@@ -1215,9 +1175,8 @@ int vsm_init(struct virtio_device *vdev)
 
 		rc = sem_init(&pVsmQueue->req_sem, 0, 0);
 		if (rc) {
-			VIRTIO_VSM_DBG_MSG(VIRTIO_VSM_DBG_ERR,
-					   "Failed to create VSM request queue "
-					   "%d sem(%d)\n", queueId, rc);
+			log_err("Failed to create VSM request queue "
+				"%d sem(%d)\n", queueId, rc);
 			goto failed;
 		}
 		/*
@@ -1230,9 +1189,8 @@ int vsm_init(struct virtio_device *vdev)
 		rc = pthread_create(&pVsmQueue->req_thread, NULL,
 				    virtioVsmReqHandle, pVsmQueue);
 		if (rc) {
-			VIRTIO_VSM_DBG_MSG(VIRTIO_VSM_DBG_ERR,
-					"Failed to create VSM request queue "
-					   "%d thread(%d)\n", queueId, rc);
+			log_err("Failed to create VSM request queue "
+				"%d thread(%d)\n", queueId, rc);
 			goto failed;
 		}
 
@@ -1246,8 +1204,7 @@ int vsm_init(struct virtio_device *vdev)
 	num = virtqueue_get_vring_size(pDrvCtrl->pQueue[pDrvCtrl->queueNum - 1]);
 	pDrvCtrl->pIrq = calloc(num, sizeof(struct virtioVsmIrq));
 	if (!pDrvCtrl->pIrq) {
-		VIRTIO_VSM_DBG_MSG(VIRTIO_VSM_DBG_ERR,
-				"allocate IRQ buffer failed\n");
+		log_err("allocate IRQ buffer failed\n");
 		goto failed;
 	}
 
@@ -1256,8 +1213,7 @@ int vsm_init(struct virtio_device *vdev)
 	/* register VSM to virtio host library */
 	virtioHostVsmDev.vsmId = pDrvCtrl;
 	if (virtioHostVsmRegister(&virtioHostVsmDev)) {
-		VIRTIO_VSM_DBG_MSG(VIRTIO_VSM_DBG_ERR,
-				"register to host library failed\n");
+		log_err("register to host library failed\n");
 		goto failed;
 	}
 	virtioHostInit();
@@ -1313,7 +1269,7 @@ failed:
 		free(pDrvCtrl);
 	}
 
-	VIRTIO_VSM_DBG_MSG(VIRTIO_VSM_DBG_ERR, "failed\n");
+	log_err("failed\n");
 
 	return -EAGAIN;
 }
@@ -1337,7 +1293,7 @@ void vsm_deinit(struct virtio_device *vdev)
 
 	pDrvCtrl = vdev->priv;
 	if (!pDrvCtrl) {
-		VIRTIO_VSM_DBG_MSG(VIRTIO_VSM_DBG_ERR, "null pDrvCtrl\n");
+		log_err("null pDrvCtrl\n");
 		return;
 	}
 
@@ -1387,9 +1343,7 @@ void vsm_deinit(struct virtio_device *vdev)
 			VIRTIO_VSM_DBG_MSG(VIRTIO_VSM_DBG_INFO,
 					   "done\n");
 		} else {
-			VIRTIO_VSM_DBG_MSG(VIRTIO_VSM_DBG_ERR,
-					   "error: %s\n",
-					   strerror(errno));
+			log_err("error: %s\n", strerror(errno));
 		}
 	}
 
@@ -1412,8 +1366,7 @@ void vsm_deinit(struct virtio_device *vdev)
 
 	ret = virtioHostCfgFree();
 	if (ret) {
-		VIRTIO_VSM_DBG_MSG(VIRTIO_VSM_DBG_ERR,
-				   "failed to free configuration memory\n");
+		log_err("failed to free configuration memory\n");
 	}
 
 	vdev->priv = NULL;
@@ -1460,16 +1413,12 @@ int virtioVsmGetUIO(VIRTIO_VSM_ID pDrvCtrl)
 	int uio_fd;
 
 	if (pDrvCtrl == NULL || pDrvCtrl->vdev == NULL) {
-		VIRTIO_VSM_DBG_MSG(
-			VIRTIO_VSM_DBG_ERR,
-			"invalid parameter\n");
+		log_err("invalid parameter\n");
 		return -1;
 	}
 	uio_fd = open(pDrvCtrl->vdev->uio_device, O_RDWR | O_SYNC);
 	if (uio_fd < 0) {
-		VIRTIO_VSM_DBG_MSG(VIRTIO_VSM_DBG_ERR,
-				   "UIO device error: %s\n",
-				   strerror(errno));
+		log_err("UIO device error: %s\n", strerror(errno));
 		return -1;
 	}
 	return uio_fd;
@@ -1485,17 +1434,14 @@ int virtioVsmGetCtrl(VIRTIO_VSM_ID pDrvCtrl)
 	int ctrl_fd;
 
 	if (pDrvCtrl == NULL || pDrvCtrl->vdev == NULL) {
-		VIRTIO_VSM_DBG_MSG(
-			VIRTIO_VSM_DBG_ERR,
-			"invalid parameter\n");
+		log_err("invalid parameter\n");
 		return -1;
 	}
 	ctrl_fd = open(pDrvCtrl->vdev->virtio_ctrl_device,
 		       O_RDWR | O_SYNC);
 	if (ctrl_fd < 0) {
-		VIRTIO_VSM_DBG_MSG(VIRTIO_VSM_DBG_ERR,
-				   "cntrol device error: %s\n",
-				   strerror(errno));
+		log_err("cntrol device error: %s\n",
+			strerror(errno));
 		return -1;
 	}
 	return ctrl_fd;
@@ -1504,9 +1450,7 @@ int virtioVsmGetCtrl(VIRTIO_VSM_ID pDrvCtrl)
 bool virtioVsmLegacyIsLittleEndian(VIRTIO_VSM_ID pDrvCtrl)
 {
 	if (pDrvCtrl == NULL || pDrvCtrl->vdev == NULL) {
-		VIRTIO_VSM_DBG_MSG(
-			VIRTIO_VSM_DBG_ERR,
-			"invalid parameter\n");
+		log_err("invalid parameter\n");
 		return false;
 	}
 	return virtio_legacy_is_little_endian(pDrvCtrl->vdev);

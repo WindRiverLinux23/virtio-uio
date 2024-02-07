@@ -24,6 +24,7 @@ This is the virtio library that provides basic VirtIO functions
 #include <sys/ioctl.h>
 #include <linux/virtio_mmio.h>
 #include "virtioLib.h"
+#include <syslog.h>
 
 #undef VIRTIO_LIB_DBG
 #ifdef VIRTIO_LIB_DBG
@@ -49,9 +50,15 @@ static uint32_t virtiolIBDbgMask = VIRTIO_LIB_DBG_ERR;
                 }                                                       \
         }                                                               \
 while ((false));
+#define log_err(fmt, ...)					\
+	VIRTIO_LIB_DBG_MSG(VIRTIO_LIB_DBG_ERR, fmt,		\
+			   ##__VA_ARGS__)
 #else
 #undef VIRTIO_LIB_DBG_MSG
 #define VIRTIO_LIB_DBG_MSG(...)
+#define log_err(fmt, ...)					\
+	syslog(LOG_ERR, "%d: %s() " fmt, __LINE__, __func__,	\
+	       ##__VA_ARGS__)
 #endif  /* VIRTIO_LIB_DBG */
 
 /* virtio features */
@@ -694,8 +701,7 @@ int virtqueueAddBuffer(struct virtqueue* pQueue,
 	for (idx = 0; idx < bufCnt; idx++) {
 		if (vmTranslate((uintptr_t)bufList[idx].buf,
 				 &bufPhysAddr) != 0) {
-			VIRTIO_LIB_DBG_MSG(VIRTIO_LIB_DBG_ERR,
-					   "translate buf fail\n");
+			log_err("translate buf fail\n");
 			errno = EINVAL;
 			return -EINVAL;
 		}
@@ -843,9 +849,7 @@ int setup_vq(struct virtio_device *vdev, unsigned int index,
 
 	num = virtio_read(vdev, VIRTIO_MMIO_QUEUE_NUM_MAX);
 	if (num == 0) {
-		VIRTIO_LIB_DBG_MSG(VIRTIO_LIB_DBG_ERR,
-				   "Queue %d is not supported\n",
-				   index);
+		log_err("Queue %d is not supported\n", index);
 		errno = ENOTSUP;
 		return -1;
 	}
@@ -853,18 +857,14 @@ int setup_vq(struct virtio_device *vdev, unsigned int index,
 	vdev->ringAddr[index] = (VIRT_ADDR)memalign(align,
 						    vring_size(num, align));
 	if (vdev->ringAddr[index] == (VIRT_ADDR)NULL) {
-		VIRTIO_LIB_DBG_MSG(VIRTIO_LIB_DBG_ERR,
-				   "failed to allocate ring %x\n",
-				   index);
+		log_err("failed to allocate ring %x\n", index);
 		errno = ENOMEM;
 		return -1;
         }
 	vdev->queues[index] = zmalloc(sizeof(struct virtqueue)
 				     + sizeof(struct vqDescExtra) * num);
 	if (vdev->queues[index] == NULL) {
-		VIRTIO_LIB_DBG_MSG(VIRTIO_LIB_DBG_ERR,
-				   "virtqueue %d mem alloc error\n",
-				   index);
+		log_err("virtqueue %d mem alloc error\n", index);
 		errno = ENOMEM;
 		return -1;
 	}
@@ -874,9 +874,8 @@ int setup_vq(struct virtio_device *vdev, unsigned int index,
 				 (void *)vdev->ringAddr[index], getpagesize(),
 				 virtioVqNotify);
 	if (ret != 0) {
-		VIRTIO_LIB_DBG_MSG(VIRTIO_LIB_DBG_ERR,
-				   "failed to initialize "
-				   "virtqueueRingInit %x\n", index);
+		log_err("failed to initialize "
+			"virtqueueRingInit %x\n", index);
 		return -1;
         }
 	virtio_write(vdev, VIRTIO_MMIO_QUEUE_NUM, num);
@@ -884,17 +883,15 @@ int setup_vq(struct virtio_device *vdev, unsigned int index,
 	if (vdev->dev.version == 1) {
 		if (vmTranslate((uintptr_t)vdev->ringAddr[index],
 				&pAddr) != 0) {
-			VIRTIO_LIB_DBG_MSG(VIRTIO_LIB_DBG_ERR,
-					   "failed to translate "
-					   "address %x: %s\n",
-					   index, strerror(errno));
+			log_err("failed to translate "
+				"address %x: %s\n",
+				index, strerror(errno));
 			return -1;
 		}
 		pfn = pAddr / align;
 		if (pfn > 0xffffffffUL) {
-			VIRTIO_LIB_DBG_MSG(VIRTIO_LIB_DBG_ERR,
-					   "fdtVirtioVqSetup ring address"
-					   "exceed support range %x\n", index);
+			log_err("fdtVirtioVqSetup ring address"
+				"exceed support range %x\n", index);
 			errno = ENOTSUP;
 			return -1;
 		}
@@ -911,10 +908,8 @@ int setup_vq(struct virtio_device *vdev, unsigned int index,
 		/* descriptors*/
 		vAddr = (uintptr_t)virtqueueGetDescAddr(vdev->queues[index]);
 		if (vmTranslate(vAddr, &descAddr) < 0) {
-			VIRTIO_LIB_DBG_MSG(VIRTIO_LIB_DBG_ERR,
-					   "desc addr translation "
-					   "failed %s\n",
-					   strerror(errno));
+			log_err("desc addr translation failed %s\n",
+				strerror(errno));
 			return -1;
 		}
 		VIRTIO_LIB_DBG_MSG(VIRTIO_LIB_DBG_INFO,
@@ -928,10 +923,9 @@ int setup_vq(struct virtio_device *vdev, unsigned int index,
 		/* available buffers */
 		vAddr = (uintptr_t)virtqueueGetAvailAddr(vdev->queues[index]);
 		if (vmTranslate(vAddr, &availAddr) < 0) {
-			VIRTIO_LIB_DBG_MSG(VIRTIO_LIB_DBG_ERR,
-					   "available addr translation "
-					   "failed %s\n",
-					   strerror(errno));
+			log_err("available addr translation "
+				"failed %s\n",
+				strerror(errno));
 			return -1;
 		}
 		VIRTIO_LIB_DBG_MSG(VIRTIO_LIB_DBG_INFO,
@@ -945,10 +939,8 @@ int setup_vq(struct virtio_device *vdev, unsigned int index,
 		/* used buffers */
 		vAddr = (uintptr_t)virtqueueGetUsedAddr(vdev->queues[index]);
 		if (vmTranslate(vAddr, &usedAddr) < 0) {
-			VIRTIO_LIB_DBG_MSG(VIRTIO_LIB_DBG_ERR,
-					   "used addr translation "
-					   "failed %s\n",
-					   strerror(errno));
+			log_err("used addr translation failed %s\n",
+				strerror(errno));
 			return -1;
 		}
 		VIRTIO_LIB_DBG_MSG(VIRTIO_LIB_DBG_INFO,
@@ -973,8 +965,7 @@ uint32_t virtio_cread32(struct virtio_device *vdev, unsigned int offset)
         uint32_t* cfg;
 
         if (vdev == NULL || vdev->dev.base == NULL) {
-                VIRTIO_LIB_DBG_MSG(VIRTIO_LIB_DBG_ERR,
-                                   "invalid input parameter\n");
+		log_err("invalid input parameter\n");
                 errno = EINVAL;
                 return -1;
         }
@@ -1029,8 +1020,7 @@ void* virtqueueGetBuffer(struct virtqueue* pQueue,
 	void* cookie;
 
 	if (pQueue == NULL) {
-		VIRTIO_LIB_DBG_MSG(VIRTIO_LIB_DBG_ERR,
-				   "null queue pointer\n");
+		log_err("null queue pointer\n");
 		return NULL;
         }
 
@@ -1049,9 +1039,8 @@ void* virtqueueGetBuffer(struct virtqueue* pQueue,
 				   pQueue->vRing.used->ring[usedIdx].id);
 
 	if (getToken >= pQueue->vRing.num) {
-		VIRTIO_LIB_DBG_MSG(VIRTIO_LIB_DBG_ERR,
-				   "ERR head:%d,num:%d\n",
-				   getToken, pQueue->vRing.num);
+		log_err("ERR head:%d,num:%d\n",
+			getToken, pQueue->vRing.num);
 		return NULL;
 	}
 
@@ -1102,8 +1091,7 @@ static int virtioDevGetFeatures(struct virtio_device* vdev)
 {
 	uint32_t featHi, featLo;
 	if (vdev == NULL) {
-		VIRTIO_LIB_DBG_MSG(VIRTIO_LIB_DBG_ERR,
-				   "invalid argument\n");
+		log_err("invalid argument\n");
 		return -1;
 	}
 	/* High part */
@@ -1186,11 +1174,9 @@ size_t virtioRegionGet(int ctrl_fd, PHYS_ADDR addr, size_t size,
 	}
 	err = ioctl(ctrl_fd, VHOST_VIRTIO_ADD_REGION, &region);
 	if (err != 0) {
-		VIRTIO_LIB_DBG_MSG(
-			VIRTIO_LIB_DBG_ERR,
-			"Adding VirtIO memory region failed: %s\n",
+		log_err("Adding VirtIO memory region failed: %s\n",
 			strerror(errno));
-                        return -1;
+		return -1;
 	}
 	*offset = region.offs;
 	return 0;

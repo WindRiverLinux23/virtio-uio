@@ -3,13 +3,15 @@ Description=VirtIO Userspace
 After=network.target
 
 [Service]
-Type=exec
+Type=forking
 Restart=on-failure
 RestartSec=5s
 
-#ExecStartPre=@BINDIR@/virtio-userspace-preset.sh
-ExecStart=@BASE_BINDIR@/sh -c '@BASE_SBINDIR@/modprobe virtio-uio && @BINDIR@/uio_test'
-ExecStop=@BASE_BINDIR@/sh -c '@BASE_SBINDIR@/modprobe -r virtio-uio'
+ExecStartPre=@BASE_SBINDIR@/modprobe virtio-uio
+ExecStart=@BINDIR@/uio_test
+KillMode=mixed
+TimeoutStopSec=3
+KillSignal=SIGTERM
 
 [Install]
 WantedBy=multi-user.target
