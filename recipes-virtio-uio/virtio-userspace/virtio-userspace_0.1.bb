@@ -37,7 +37,7 @@ PR = "r0"
 PV = "0.1"
 S  = "${WORKDIR}"
 
-DEPENDS = "virtio-uio libyaml openssl"
+DEPENDS = "linux-libc-headers virtio-uio libyaml openssl"
 
 SRC_URI = "file://Makefile \
            file://COPYING \

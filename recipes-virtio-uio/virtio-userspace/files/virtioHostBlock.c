@@ -40,6 +40,7 @@
 #include <stdbool.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <syslog.h>
 #include <sys/types.h>
 #include <sys/param.h>
 #include <sys/ioctl.h>
@@ -68,8 +69,12 @@
 #define VIRTIO_BLK_DEV_DBG_INFO            0x00000200
 #define VIRTIO_BLK_DEV_DBG_ALL             0xffffffff
 
-static uint32_t virtioBlkDevDbgMask = VIRTIO_BLK_DEV_DBG_ERR;
+static uint32_t virtioBlkDevDbgMask = VIRTIO_BLK_DEV_DBG_ALL;
 
+#undef VIRTIO_BLK_DEV_DBG
+#undef VIRTIO_BLK_DEV_DBG_PRINTF
+
+#ifdef VIRTIO_BLK_DEV_DBG_PRINTF
 #define VIRTIO_BLK_DEV_DBG(mask, fmt, ...)				\
 	do {								\
 		if ((virtioBlkDevDbgMask & (mask)) ||			\
@@ -80,8 +85,20 @@ static uint32_t virtioBlkDevDbgMask = VIRTIO_BLK_DEV_DBG_ERR;
 	}								\
 while ((false))
 #else
+#define VIRTIO_BLK_DEV_DBG(mask, fmt, ...)				\
+	do {								\
+		if ((virtioBlkDevDbgMask & (mask)) ||			\
+		    ((mask) == VIRTIO_BLK_DEV_DBG_ALL)) {		\
+			syslog(LOG_ERR, "%d: %s() " fmt, __LINE__, __func__, \
+				##__VA_ARGS__);				\
+		}							\
+	}								\
+while ((false))
+#endif
+
+#else
 #define VIRTIO_BLK_DEV_DBG(...)
-#endif  /* REG_MAP_DBG_ON */
+#endif  /* VIRTIO_BLK_DEV_DBG_ON */
 
 
 #define VIRTIO_BLK_DRV_NAME         "virtio-block-host"
@@ -94,19 +111,6 @@ while ((false))
 #define VIRTIO_BLK_SIZE          512
 
 #define VIRTIO_BLK_HOST_DEV_MAX  30
-
-/* feature */
-#define HEX_CODE_CHECK(s, mode)                                                \
-	do {                                                                   \
-		if ((s[0] == '0') && ((s[1] == 'x') || (s[1] == 'X')))         \
-		{                                                              \
-			mode = 16;                                             \
-		}                                                              \
-		else                                                           \
-		{                                                              \
-			mode = 10;                                             \
-		}                                                              \
-	} while (0)
 
 enum virtioBlkOpType {
 	BLK_OP_READ,
@@ -548,14 +552,20 @@ static int virtioHostBlkCreateWithBlk(struct virtioBlkHostDev *pBlkHostDev)
 		/* get size */
 		ret = ioctl(pBlkHostDev->fd, BLKGETSIZE, &sz);
 		if (ret) {
-			VIRTIO_BLK_DEV_DBG(VIRTIO_BLK_DEV_DBG_ERR,
+			VIRTIO_BLK_DEV_DBG(VIRTIO_BLK_DEV_DBG_INFO,
 					"failed to BLKGETSIZE(%d)\n", ret);
+			VIRTIO_BLK_DEV_DBG(VIRTIO_BLK_DEV_DBG_INFO,
+					"sbuf.st_size: 0x%lx\n", sbuf.st_size);
 			size = sbuf.st_size;	/* set default value */
 		} else {
+			VIRTIO_BLK_DEV_DBG(VIRTIO_BLK_DEV_DBG_INFO,
+					"BLKGETSIZE: 0x%lx\n", sz);
 			size = sz * DEV_BSIZE;	/* DEV_BSIZE is 512 on Linux */
 		}
 		if (!ret || ret == EFBIG) {
 			ret = ioctl(pBlkHostDev->fd, BLKGETSIZE64, &b);
+			VIRTIO_BLK_DEV_DBG(VIRTIO_BLK_DEV_DBG_INFO,
+					"BLKGETSIZE64: 0x%lx(%d)\n", b, ret);
 			if (ret || b == 0 || b == sz)
 				size = b * DEV_BSIZE;
 			else
@@ -983,13 +993,6 @@ static int virtioHostBlkParseArgs(struct virtioBlkBeDevArgs *pBlkBeDevArgs, char
 					"invalid device option(%s)\n", cp);
 			goto err;
 		}
-	}
-
-	if (pBlkBeDevArgs->sectorSize != VIRTIO_BLK_SIZE) {
-		VIRTIO_BLK_DEV_DBG(VIRTIO_BLK_DEV_DBG_ERR,
-				"logical sector size must equal to %d\n", VIRTIO_BLK_SIZE);
-		ret = -EINVAL;
-		goto err;
 	}
 
 	if ((pBlkBeDevArgs->subFile) && (pBlkBeDevArgs->subFileSize == 0)) {
