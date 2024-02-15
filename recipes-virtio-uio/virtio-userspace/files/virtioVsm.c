@@ -1036,6 +1036,8 @@ int vsm_init(struct virtio_device *vdev)
 	/* Set up virtual device */
 	virtioDevInit(vdev);
 
+	virtio_add_status(vdev, VIRTIO_CONFIG_S_ACKNOWLEDGE);
+
 	/* Get max channels */
         if (virtioGetChannelMax(vdev, &channelMax) != 0) {
                 return -1;
@@ -1223,6 +1225,8 @@ int vsm_init(struct virtio_device *vdev)
 	}
 	virtioHostInit();
 
+	virtio_add_status(vdev, VIRTIO_CONFIG_S_DRIVER);
+
 	/* Init host net driver */
 	virtioHostNetDrvInit();
 
@@ -1239,6 +1243,8 @@ int vsm_init(struct virtio_device *vdev)
 
 	/* Init host lib */
 	virtioHostDevicesInit();
+
+	virtio_add_status(vdev, VIRTIO_CONFIG_S_FEATURES_OK);
 
 	VIRTIO_VSM_DBG_MSG(VIRTIO_VSM_DBG_INFO, "done\n");
 
