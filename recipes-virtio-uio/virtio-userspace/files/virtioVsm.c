@@ -56,7 +56,7 @@ only MMIO device is supported.
 #define VIRTIO_VSM_DBG_INFO            0x00000020
 #define VIRTIO_VSM_DBG_ALL             0xffffffff
 
-static uint32_t virtioVsmDbgMask = VIRTIO_VSM_DBG_ERR | VIRTIO_VSM_DBG_INFO;
+static uint32_t virtioVsmDbgMask = VIRTIO_VSM_DBG_ERR;
 
 #define VIRTIO_VSM_DBG_MSG(mask, fmt, ...)                              \
         do {                                                            \
@@ -719,8 +719,11 @@ static int virtioVsmNotify(struct virtioVsmQueue *pVsmQueue,
 
 	pIrqQueue = pDrvCtrl->pQueue[VIRTIO_VSM_IRQ_QUEUE];
 
-	if (pIrqQueue->num_free == 0)
+	if (pIrqQueue->num_free == 0) {
 		log_err("no irq resource available\n");
+		errno = ENOBUFS;
+		return -ENOBUFS;
+	}
 
 	irq = &pDrvCtrl->pIrq[pDrvCtrl->irqProd];
 
@@ -979,7 +982,7 @@ extern void virtioHostNetDrvInit(void);
 extern void virtioHostNetDrvRelease(void);
 extern void virtioHostBlkDrvInit(uint32_t mountTimeout);
 extern void virtioHostBlkDrvRelease(void);
-extern void virtioHostConsoleDrvInit(uint32_t buf_size);
+extern void virtioHostConsoleDrvInit(void);
 extern void virtioHostConsoleDrvRelease(void);
 extern void virtioHostGpuDrvInit(void);
 extern void virtioHostGpuDrvRelease(void);
@@ -1227,7 +1230,7 @@ int vsm_init(struct virtio_device *vdev)
 	virtioHostBlkDrvInit(10);
 
 	/* Init host console driver */
-	virtioHostConsoleDrvInit(4096);
+	virtioHostConsoleDrvInit();
 
 #ifdef INCLUDE_HOST_GPU
 	/* Init host gpu driver */
@@ -1393,8 +1396,9 @@ int virtioHostEventHandler(struct virtio_device* vdev)
 	uint32_t queueId;
 	int err;
 	struct virtioVsm *pDrvCtrl = vdev->priv;
-	uint32_t status = virtio_read(vdev, VIRTIO_MMIO_INTERRUPT_STATUS);
-
+	volatile uint32_t status = 0;
+	virtio_mb();
+	status = virtio_read(vdev, VIRTIO_MMIO_INTERRUPT_STATUS);
 	virtio_write(vdev, VIRTIO_MMIO_INTERRUPT_ACK, status);
 
 	if ((status & VIRTIO_MMIO_INT_CONFIG) != 0U) {

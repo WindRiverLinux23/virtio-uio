@@ -93,14 +93,16 @@ void virtio_write(struct virtio_device *vdev,
 			 uint32_t val)
 {
         host_writel(htole32(val), (uint32_t*)(vdev->dev.base + reg));
-	__mb();
+	virtio_wmb();
 }
 
 uint32_t virtio_read(struct virtio_device *vdev,
 			    uint32_t reg)
 {
-	__mb();
-	return le32toh(host_readl((uint32_t*)(vdev->dev.base + reg)));
+	volatile uint32_t regvalue;
+	virtio_rmb();
+	regvalue = host_readl((uint32_t*)(vdev->dev.base + reg));
+	return le32toh(regvalue);
 }
 
 static bool virtioNeedConvert(const struct virtio_device * vdev)
@@ -262,7 +264,7 @@ bool virtqueueIntrEnable(struct virtqueue* pQueue)
 
 	vring_used_event(&pQueue->vRing) =
 		cpu_to_virtio16(pQueue->vdev, pQueue->usedIdx);
-	__mb();
+	virtio_mb();
 
 	usedIdx = virtio16_to_cpu(pQueue->vdev, pQueue->vRing.used->idx);
 
@@ -298,7 +300,7 @@ void virtqueueIntrDisable(struct virtqueue* pQueue)
 						pQueue->availFlagShadow);
 		}
 	}
-	__mb();
+	virtio_wmb();
 	return;
 }
 
@@ -751,7 +753,7 @@ int virtqueueAddBuffer(struct virtqueue* pQueue,
 	/* idx always increments, and wraps naturally at 65536 */
 	availIdx++;
 	pQueue->vRing.avail->idx = cpu_to_virtio16(pQueue->vdev, availIdx);
-	__mb();
+	virtio_wmb();
 	return 0;
 }
 
@@ -778,7 +780,7 @@ int virtqueueKick(struct virtqueue* pQueue)
 		return -EINVAL;
         }
 
-	__mb();
+	virtio_mb();
 
 	if (virtioHasFeatures(pQueue->vdev,
 			      VIRTIO_F_RING_EVENT_IDX) != 0UL) {
@@ -1024,10 +1026,10 @@ void* virtqueueGetBuffer(struct virtqueue* pQueue,
 		return NULL;
         }
 
-	__mb();
 	VIRTIO_LIB_DBG_MSG(VIRTIO_LIB_DBG_QUEUE,
 			   "start\n");
 
+	virtio_rmb();
 	if (pQueue->usedIdx == virtio16_to_cpu(pQueue->vdev,
 					       pQueue->vRing.used->idx)) {
 		return NULL;
@@ -1066,7 +1068,7 @@ void* virtqueueGetBuffer(struct virtqueue* pQueue,
 			cpu_to_virtio16(pQueue->vdev, pQueue->usedIdx);
 	}
 
-	__mb();
+	virtio_wmb();
 
 	VIRTIO_LIB_DBG_MSG(VIRTIO_LIB_DBG_QUEUE,
 			   "done\n");

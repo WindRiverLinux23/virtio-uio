@@ -52,8 +52,7 @@ logic, such as configuration handling or queue handling.
 #define VIRTIO_HOST_DBG_INFO            0x00000020
 #define VIRTIO_HOST_DBG_ALL             0xffffffff
 
-static uint32_t virtioHostDbgMask = VIRTIO_HOST_DBG_ERR |
-	VIRTIO_HOST_DBG_QUEUE | VIRTIO_HOST_DBG_INFO;
+static uint32_t virtioHostDbgMask = VIRTIO_HOST_DBG_ERR;
 
 #define VIRTIO_HOST_DBG_MSG(mask, fmt, ...)				\
 	do {								\
@@ -83,6 +82,13 @@ while ((false));
 
 #define DEFINE_SPINLOCK(mutex) pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER
 #define DEFINE_MUTEX(mutex) pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER
+
+/*
+ * The number of times to wait for vring data synchronizes.
+ * Used only in development. Should be removed from production
+ * code.
+ */
+#define FAKE_KICK_DEBUG_CYCLE 10
 
 /* forward declarations */
 
@@ -621,7 +627,7 @@ int virtioHostVsmReqKick(struct virtioHost *vHost, uint32_t queueId)
 		return -1;
 	}
 
-	__mb();
+	virtio_rmb();
 
 	offset = offsetof(struct vring_avail, idx);
 	pavail = (unsigned char *)vHost->pQueue[queueId].vRing.avail;
@@ -631,13 +637,13 @@ int virtioHostVsmReqKick(struct virtioHost *vHost, uint32_t queueId)
 			    pavail, offset, pidx);
 
 	/* FIXME: remove the cycle after the testing */
-	for (i = 0; i < 200; i++) {
+	for (i = 0; i < FAKE_KICK_DEBUG_CYCLE; i++) {
+		virtio_rmb();
 		idx = host_virtio16_to_cpu(vHost, host_readw(pidx));
 		if (idx != vHost->pQueue[queueId].availIdx) {
 			break;
 		}
 		usleep(10);
-		__mb();
 	}
 
 	VIRTIO_HOST_DBG_MSG(VIRTIO_HOST_DBG_IOREQ,
@@ -1633,6 +1639,12 @@ static int virtioHostQueueEnable(struct virtioHost *vHost,
 
 	pQueue->vRing.used = (struct vring_used *)hvaddr;
 
+	/* reset used flags */
+	pQueue->usedFlagShadow = 0;
+	pQueue->vRing.used->flags = host_cpu_to_virtio16(
+		pQueue->vHost, pQueue->usedFlagShadow);
+	virtio_wmb();
+
 	return 0;
 }
 
@@ -1785,7 +1797,7 @@ int virtioHostQueueGetBuf(struct virtioHostQueue *pQueue,
 		return -1;
 	}
 
-	__mb();
+	virtio_mb();
 
 	/* get the FE avail index */
 	offset = offsetof(struct vring_avail, idx);
@@ -2091,7 +2103,7 @@ int virtioHostQueueRelBuf(struct virtioHostQueue *pQueue, uint16_t descIdx,
 	host_writew(host_cpu_to_virtio16(pQueue->vHost, ++pQueue->usedIdx),
 		    pidx);
 
-	__mb();
+	virtio_mb();
 
 	VIRTIO_HOST_DBG_MSG (VIRTIO_HOST_DBG_QUEUE,
 			     "release buf usedIdx(%d) desc index(%d)\n",
@@ -2153,7 +2165,7 @@ int virtioHostQueueNotify(struct virtioHostQueue *pQueue)
 
 	vHost->intStatus |= VIRTIO_MMIO_INT_VRING;
 
-	__mb();
+	virtio_mb();
 
 	if (vritioHostHasFeature(vHost, VIRTIO_F_NOTIFY_ON_EMPTY) &&
 	    host_virtio16_to_cpu(pQueue->vHost, pQueue->vRing.avail->idx) ==
@@ -2169,6 +2181,7 @@ int virtioHostQueueNotify(struct virtioHostQueue *pQueue)
 		new = pQueue->lastUsedIdx =
 			(uint16_t)host_virtio16_to_cpu(
 				pQueue->vHost, pQueue->vRing.used->idx);
+		virtio_mb();
 		eventIdx = vring_used_event(&pQueue->vRing);
 		VIRTIO_HOST_DBG_MSG(
 			VIRTIO_HOST_DBG_INFO,
@@ -2190,7 +2203,7 @@ int virtioHostQueueNotify(struct virtioHostQueue *pQueue)
 
 	if (needKick) {
 		VIRTIO_HOST_DBG_MSG(VIRTIO_HOST_DBG_INFO, "kick\n");
-		__mb();
+		virtio_mb();
 		ret = virtioHostNotify(vHost);
 	}
 
@@ -2249,7 +2262,7 @@ int virtioHostQueueIntrEnable(struct virtioHostQueue *pQueue)
 
 	}
 
-	__mb();
+	virtio_wmb();
 	return 0;
 }
 

@@ -40,8 +40,11 @@ extern "C" {
 #define VIRTIO_VSM_CFG_REGION 1
 
 #define dmb(opt) asm volatile("dmb " #opt : : : "memory")
-#define __mb()	dmb(ish)
+#define virtio_wmb()	dmb(ish)
 #define __iomem volatile
+#define virtio_rmb() dmb(ishld)
+#define virtio_wmb() dmb(ishst)
+#define virtio_mb() __sync_synchronize()
 
 #define max(a,b)				\
 ({						\
