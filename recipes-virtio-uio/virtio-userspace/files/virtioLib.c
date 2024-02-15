@@ -1016,15 +1016,18 @@ static void virtioSetStatus(struct virtio_device* vdev,
  * ERRNO: N/A
  */
 
-static uint8_t virtioGetStatus(struct virtio_device* vdev)
+uint8_t virtioGetStatus(struct virtio_device* vdev)
 {
 	return (uint8_t)(virtio_read(vdev, VIRTIO_MMIO_STATUS) & 0xffU);
 }
 
 void virtio_add_status(struct virtio_device* vdev, uint8_t status)
 {
-        uint8_t l_status = virtioGetStatus(vdev);
-        virtioSetStatus(vdev, (l_status | status));
+	uint8_t l_status = virtioGetStatus(vdev);
+	/* update status only when it differs from the original */
+	if ((l_status | status) != l_status) {
+		virtioSetStatus(vdev, (l_status | status));
+	}
 }
 
 void* virtqueueGetBuffer(struct virtqueue* pQueue,

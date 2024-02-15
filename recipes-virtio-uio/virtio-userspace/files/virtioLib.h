@@ -296,6 +296,7 @@ extern int setup_vq(struct virtio_device *vdev, unsigned int index,
 		    struct virtqueueInfo* vqInfo);
 extern uint32_t virtio_read(struct virtio_device *vdev, uint32_t reg);
 extern void virtio_write(struct virtio_device *vdev, uint32_t reg, uint32_t val);
+extern uint8_t virtioGetStatus(struct virtio_device* vdev);
 extern void virtio_add_status(struct virtio_device *dev, uint8_t status);
 extern void* virtqueueGetBuffer(struct virtqueue* vq, unsigned int *len,
 				uint32_t* token);

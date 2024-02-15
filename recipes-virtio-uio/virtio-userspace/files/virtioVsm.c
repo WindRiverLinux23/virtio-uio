@@ -1045,7 +1045,15 @@ int vsm_init(struct virtio_device *vdev)
 		return -EINVAL;
 	}
 
-	virtioDevReset(vdev);
+	/*
+	 * Handle the situation when Linux boots and the kernel VirtIO
+	 * driver has already set the VIRTIO_CONFIG_S_ACKNOWLEDGE flag.
+	 * We do not want to bring the device back to reset status but
+	 * continue the initialization instead.
+	 */
+	if (virtioGetStatus(vdev) != VIRTIO_CONFIG_S_ACKNOWLEDGE) {
+		virtioDevReset(vdev);
+	}
 
 	/* Set up virtual device */
 	virtioDevInit(vdev);
