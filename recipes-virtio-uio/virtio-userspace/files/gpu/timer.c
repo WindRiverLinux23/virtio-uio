@@ -1,4 +1,9 @@
 /*
+ * Copyright (C) 2018-2022 Intel Corporation.
+ * SPDX-License-Identifier: BSD-3-Clause
+ */
+
+/*
  * Copyright (c) 2024, Wind River Systems, Inc.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
@@ -7,10 +12,10 @@
  * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
  * copies of the Software, and to permit persons to whom the Software is
  * furnished to do so, subject to the following conditions:
- *
+ *  
  * The above copyright notice and this permission notice shall be included in
  * all copies or substantial portions of the Software.
- *
+ *  
  * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
  * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
  * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
@@ -19,12 +24,6 @@
  * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
  * THE SOFTWARE.
  */
-
-/*
-modification history
---------------------
-28jan24,qsn  ported from ACRN project
-*/
 
 #include <stdio.h>
 #include <stdbool.h>
@@ -36,8 +35,7 @@ modification history
 
 #include "../mevent.h"
 #include "timer.h"
-#include "../virtioHostLib.h"
-#include "virtio_host_gpu.h"
+#include "virtio_host_gpu_cfg.h"
 
 /* We can use timerfd and epoll mechanism to emulate kinds of timers like
  * PIT/RTC/WDT/PMTIMER/... in device model under Linux.

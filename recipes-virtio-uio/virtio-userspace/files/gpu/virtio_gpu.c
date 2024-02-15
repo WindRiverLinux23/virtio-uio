@@ -1,4 +1,14 @@
 /*
+ * Copyright (C) OASIS Open 2018. All rights reserved.
+ * Copyright (C) 2022 Intel Corporation.
+ *
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
+ * virtio-gpu device
+ *
+ */
+
+/*
  * Copyright (c) 2024, Wind River Systems, Inc.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
@@ -7,11 +17,10 @@
  * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
  * copies of the Software, and to permit persons to whom the Software is
  * furnished to do so, subject to the following conditions:
- *
- * virtio-gpu device
+ *  
  * The above copyright notice and this permission notice shall be included in
  * all copies or substantial portions of the Software.
- *
+ *  
  * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
  * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
  * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
@@ -20,12 +29,6 @@
  * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
  * THE SOFTWARE.
  */
-
-/*
-modification history
---------------------
-28jan24,qsn  ported from ACRN project
-*/
 
 #include <sys/ioctl.h>
 #include <errno.h>
@@ -64,6 +67,10 @@ static int mem_fd;
 static bool virtio_gpu_init_once = false;
 static int scanout_num = 0;
 static pthread_t mevent_dispatch_td;
+
+#ifdef INCLUDE_VIRGLRENDERER_SUPPORT
+static bool virgl_supported = false;
+#endif
 
 void* mevent_dispatch_thread(void *my_unused)
 {
@@ -198,6 +205,10 @@ virtio_gpu_reset(void *vdev)
 		}
 	}
 	LIST_INIT(&gpu->r2d_list);
+
+#ifdef INCLUDE_VIRGLRENDERER_SUPPORT
+        virgl_renderer_reset();
+#endif
 }
 
 void
@@ -1251,7 +1262,9 @@ virtio_gpu_bh(void *data)
 			continue;
 		}
 
-		/* for virglrender, these commands are processed differently later */
+#ifdef INCLUDE_VIRGLRENDERER_SUPPORT
+		virtio_gpu_cmd_gl_process(pQueue, idx, &cmd);
+#else
 
                 switch (cmd.hdr.type) {
 
@@ -1292,6 +1305,8 @@ virtio_gpu_bh(void *data)
 		/* release the buffer and send INT to virtio FE driver */
 		(void)virtioHostQueueRelBuf(pQueue, idx, cmd.iolen);
 		(void)virtioHostQueueNotify(pQueue);
+
+#endif /* INCLUDE_VIRGLRENDERER_SUPPORT */
 
 	}
 }
@@ -1374,7 +1389,6 @@ virtio_gpu_init(struct virtioGpuHostDev *pGpuHostDev)
 	}
 
         if (!virtio_gpu_init_once) {
-
 		gpu->gpu_scanouts = calloc(VSCREEN_MAX_NUM, sizeof(struct virtio_gpu_scanout));
 		if (gpu->gpu_scanouts == NULL) {
 			VIRTIO_GPU_DEV_DBG(VIRTIO_GPU_DEV_DBG_ERR, "out of memory for gpu_scanouts\n");
@@ -1399,8 +1413,6 @@ virtio_gpu_init(struct virtioGpuHostDev *pGpuHostDev)
 		gpu->cfg.num_capsets = 0;
 
 		LIST_INIT(&gpu->r2d_list);
-
-		virtio_gpu_init_once = true;
 	}
 
 	/* initialize gfx ui */
@@ -1421,6 +1433,24 @@ virtio_gpu_init(struct virtioGpuHostDev *pGpuHostDev)
 	gpu->cfg.num_scanouts = gpu->scanout_num;
 
 	VIRTIO_GPU_DEV_DBG(VIRTIO_GPU_DEV_DBG_INFO, "gpu->scanout_num=%d\n",  gpu->scanout_num);
+
+        if (!virtio_gpu_init_once) {
+#ifdef INCLUDE_VIRGLRENDERER_SUPPORT
+                rc = virtio_gpu_virgl_init(gpu);
+                if (rc) {
+                        VIRTIO_GPU_DEV_DBG(VIRTIO_GPU_DEV_DBG_ERR, "virgl init failed: %d.\n", rc);
+                        goto init_fail;
+                }
+                virgl_supported = true;
+#endif
+		virtio_gpu_init_once = true;
+	}
+
+#ifdef INCLUDE_VIRGLRENDERER_SUPPORT
+	if (virgl_supported) {
+		gpu->feature |= 1 << VIRTIO_GPU_F_VIRGL;
+	}
+#endif
 
 	return 0;
 

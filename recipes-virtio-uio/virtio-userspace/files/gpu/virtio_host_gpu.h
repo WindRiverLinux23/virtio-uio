@@ -1,5 +1,3 @@
-/* virtio_host_gpu.h - virtio GPU host driver header */
-
 /*
  * Copyright (c) 2024, Wind River Systems, Inc.
  *
@@ -9,10 +7,10 @@
  * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
  * copies of the Software, and to permit persons to whom the Software is
  * furnished to do so, subject to the following conditions:
- *
+ *  
  * The above copyright notice and this permission notice shall be included in
  * all copies or substantial portions of the Software.
- *
+ *  
  * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
  * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
  * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
@@ -22,39 +20,19 @@
  * THE SOFTWARE.
  */
 
-/*
-modification history
---------------------
-28jan24,qsn  written
-*/
-
 #ifndef __INCvirtioHostGpuh
 #define __INCvirtioHostGpuh
 
 #include <sys/uio.h>
 #include <pthread.h>
 
+#include "virtio_host_gpu_cfg.h"
 #include "virtio_gpu.h"
 #include "vdisplay.h"
-
-#define MIN(a,b) (((a)<(b))?(a):(b))
-
-/*
- * Virtqueue buf chain size.
- */
-#define VIRTIO_GPU_MAXSEGS      256
-
-#define CHANNELS_MAX_NUM 16
-
-#define VSCREEN_MAX_NUM 16
 
 #define VIRTIO_GPU_NM_QUEUES      2     /* virtio gpu device has 2 queues */
 #define VIRTIO_GPU_CONTROLQ       0
 #define VIRTIO_GPU_CURSORQ        1
-
-#define VIRTIO_GPU_QUEUE_MAX_NUM  256
-
-#define VIRTIO_GPU_EDID_SIZE    384
 
 /* If the blob size is less than 16K, it is regarded as the
  * cursor_buffer.
@@ -62,32 +40,7 @@ modification history
  */
 #define CURSOR_BLOB_SIZE        (16 * 1024)
 
-#define VIRTIO_GPU_DEV_DBG_ON
-#ifdef VIRTIO_GPU_DEV_DBG_ON
-
-#define VIRTIO_GPU_DEV_DBG_OFF             0x00000000
-#define VIRTIO_GPU_DEV_DBG_ISR             0x00000001
-#define VIRTIO_GPU_DEV_DBG_ARGS            0x00000002
-#define VIRTIO_GPU_DEV_DBG_ERR             0x00000004
-#define VIRTIO_GPU_DEV_DBG_INFO            0x00000008
-#define VIRTIO_GPU_DEV_DBG_DBUG            0x00000010
-#define VIRTIO_GPU_DEV_DBG_ALL             0xffffffff
-
-static uint32_t virtioGpuDevDbgMask = VIRTIO_GPU_DEV_DBG_ERR | VIRTIO_GPU_DEV_DBG_INFO;
-
-#undef VIRTIO_GPU_DEV_DBG
-#define VIRTIO_GPU_DEV_DBG(mask, fmt, ...)                              \
-        do {                                                            \
-                if ((virtioGpuDevDbgMask & (mask)) ||                   \
-                    ((mask) == VIRTIO_GPU_DEV_DBG_ALL)) {               \
-                        printf("%d: %s: " fmt, __LINE__, __func__,     \
-                               ##__VA_ARGS__);                          \
-                }                                                       \
-        }                                                               \
-while ((false))
-#else
-#define VIRTIO_GPU_DEV_DBG(...)
-#endif  /* VIRTIO_GPU_DEV_DBG_ON */
+#define MIN(a,b) (((a)<(b))?(a):(b))
 
 struct dma_buf_info_list {
         int fd;
@@ -120,6 +73,9 @@ struct virtio_gpu_scanout {
         int scanout_id;
         uint32_t resource_id;
         struct virtio_gpu_rect scanout_rect;
+#ifdef INCLUDE_VIRGLRENDERER_SUPPORT
+	struct cursor *cur_cursor;
+#endif
         pixman_image_t *cur_img;
         struct dma_buf_info *dma_buf;
         bool is_active;
@@ -165,6 +121,13 @@ extern void virtio_gpu_update_resp_fence(struct virtio_gpu_ctrl_hdr *hdr,
                                          struct virtio_gpu_ctrl_hdr *resp);
 extern int virtioHostPhyaddrG2H(struct virtioHost *vHost,
                                 PHYS_ADDR gpaddr, PHYS_ADDR *hpaddr);
+
+#ifdef INCLUDE_VIRGLRENDERER_SUPPORT
+extern void virtio_gpu_cmd_gl_process(struct virtioHostQueue *pQueue,
+				      uint16_t idx,
+				      struct virtio_gpu_command *cmd);
+extern int virtio_gpu_virgl_init(void *g);
+#endif
 
 #endif /* __INCvirtioHostGpuh */
 

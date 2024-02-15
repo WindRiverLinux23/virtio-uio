@@ -1,4 +1,13 @@
 /*
+ * Copyright (C) 2022 Intel Corporation.
+ *
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
+ * Virtual Display for VMs
+ *
+ */
+
+/*
  * Copyright (c) 2024, Wind River Systems, Inc.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
@@ -7,11 +16,10 @@
  * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
  * copies of the Software, and to permit persons to whom the Software is
  * furnished to do so, subject to the following conditions:
- *
- * Virtual Display for VMs
+ *  
  * The above copyright notice and this permission notice shall be included in
  * all copies or substantial portions of the Software.
- *
+ *  
  * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
  * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
  * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
@@ -21,112 +29,23 @@
  * THE SOFTWARE.
  */
 
-/*
-modification history
---------------------
-28jan24,qsn  ported from ACRN project
-*/
-
 #include <stdlib.h>
 #include <string.h>
 #define _GNU_SOURCE
 #include <pthread.h>
-#include <SDL2/SDL.h>
-#include <SDL2/SDL_syswm.h>
-#include <EGL/egl.h>
-#include <pixman-1/pixman.h>
 #include <unistd.h>
 #include <errno.h>
 #include <string.h>
 #include "vdisplay.h"
 #include "atomic.h"
-#include "timer.h"
-#include <EGL/eglext.h>
-#include <GLES2/gl2.h>
-#include <GLES2/gl2ext.h>
-
 #include "../virtioHostLib.h"
 #include "virtio_host_gpu.h"
 
-#define XDG_RUNTIME_DIR_NAME "/run/user/root"
-
-#define VDPY_MAX_WIDTH 1920
-#define VDPY_MAX_HEIGHT 1080
-#define VDPY_DEFAULT_WIDTH 1024
-#define VDPY_DEFAULT_HEIGHT 768
-#define VDPY_MIN_WIDTH 640
-#define VDPY_MIN_HEIGHT 480
 #define transto_10bits(color) (uint16_t)(color * 1024 + 0.5)
-
-int pthread_setname_np(pthread_t *thread, const char *name);
-int pthread_getname_np(pthread_t *thread,
-                       const char *name, size_t len);
-char *strcasestr(const char *haystack, const char *needle);
 
 static unsigned char default_raw_argb[VDPY_DEFAULT_WIDTH * VDPY_DEFAULT_HEIGHT * 4];
 
-struct state {
-	bool is_ui_realized;
-	bool is_active;
-	bool is_wayland;
-	bool is_x11;
-	bool is_fullscreen;
-	uint64_t updates;
-	int n_connect;
-};
-
-struct egl_display_ops {
-	PFNEGLCREATEIMAGEKHRPROC eglCreateImageKHR;
-	PFNEGLDESTROYIMAGEKHRPROC eglDestroyImageKHR;
-	PFNGLEGLIMAGETARGETTEXTURE2DOESPROC glEGLImageTargetTexture2DOES;
-};
-
-struct vscreen {
-	struct display_info info;
-	int pscreen_id;
-	SDL_Rect pscreen_rect;
-	bool is_fullscreen;
-	int org_x;
-	int org_y;
-	int width;
-	int height;
-	int guest_width;
-	int guest_height;
-	uint32_t channelId;
-	struct surface surf;
-	struct cursor cur;
-	SDL_Texture *surf_tex;
-	SDL_Texture *cur_tex;
-	SDL_Texture *bogus_tex;
-	int surf_updates;
-	int cur_updates;
-	SDL_Window *win;
-	SDL_Renderer *renderer;
-	pixman_image_t *img;
-	EGLImage egl_img;
-	/* Record the update_time that is activated from guest_vm */
-	struct timespec last_time;
-};
-
-static struct display {
-	struct state s;
-	struct vscreen *vscrs;
-	int vscrs_num;
-	pthread_t tid;
-	/* Add one UI_timer(33ms) to render the buffers from guest_vm */
-	struct acrn_timer ui_timer;
-	struct vdpy_display_bh ui_timer_bh;
-	// protect the request_list
-	pthread_mutex_t vdisplay_mutex;
-	// receive the signal that request is submitted
-	pthread_cond_t  vdisplay_signal;
-	TAILQ_HEAD(display_list, vdpy_display_bh) request_list;
-	/* add the below two fields for calling eglAPI directly */
-	bool egl_dmabuf_supported;
-	SDL_GLContext eglContext;
-	EGLDisplay eglDisplay;
-	struct egl_display_ops gl_ops;
-} vdpy = {
+static struct display  vdpy = {
 	.s.is_ui_realized = false,
 	.s.is_active = false,
 	.s.is_wayland = false,
@@ -679,8 +598,7 @@ vdpy_surface_set(int handle, int scanout_id, struct surface *surf)
 	}
 
 	if (vdpy.tid != pthread_self()) {
-		VIRTIO_GPU_DEV_DBG(VIRTIO_GPU_DEV_DBG_ERR, "%s: unexpected code path as unsafe 3D ops in multi-threads env.\n",
-			__func__);
+		VIRTIO_GPU_DEV_DBG(VIRTIO_GPU_DEV_DBG_ERR, "unexpected code path as unsafe 3D ops in multi-threads env.\n");
 		return;
 	}
 
@@ -1085,6 +1003,18 @@ vdpy_create_vscreen_window(struct vscreen *vscr)
 	VIRTIO_GPU_DEV_DBG(VIRTIO_GPU_DEV_DBG_INFO, "SDL display bind to screen %d: [%d,%d,%d,%d].\n", vscr->pscreen_id,
 			vscr->org_x, vscr->org_y, vscr->width, vscr->height);
 
+#ifdef INCLUDE_VIRGLRENDERER_SUPPORT
+	vscr->winctx = SDL_GL_CreateContext(vscr->win);
+        if (vscr->winctx == NULL) {
+		SDL_DestroyWindow(vscr->win);
+                VIRTIO_GPU_DEV_DBG(VIRTIO_GPU_DEV_DBG_ERR, "Failed to Create OpenGL context\n");
+                return -1;
+        }
+        vscr->guest_fb.tex = 0;
+        vscr->guest_fb.framebuffer = 0;
+#endif
+
+#if 1 /*ndef INCLUDE_VIRGLRENDERER_SUPPORT */
 	vscr->renderer = SDL_CreateRenderer(vscr->win, -1, 0);
 	if (vscr->renderer == NULL) {
 		VIRTIO_GPU_DEV_DBG(VIRTIO_GPU_DEV_DBG_ERR, "Failed to Create GL_Renderer \n");
@@ -1098,6 +1028,7 @@ vdpy_create_vscreen_window(struct vscreen *vscr)
 		return -1;
 	}
 	SDL_SetTextureColorMod(vscr->bogus_tex, 0x80, 0x80, 0x80);
+#endif
 
 	return 0;
 }
@@ -1132,6 +1063,7 @@ vdpy_sdl_display_thread(void *data)
 	TAILQ_INIT(&vdpy.request_list);
 	vdpy.s.is_active = 1;
 
+#if 0 /* ndef INCLUDE_VIRGLRENDERER_SUPPORT */
 	vdpy.ui_timer_bh.task_cb = vdpy_sdl_ui_refresh;
 	vdpy.ui_timer_bh.data = &vdpy;
 	vdpy.ui_timer.clockid = CLOCK_MONOTONIC;
@@ -1143,6 +1075,7 @@ vdpy_sdl_display_thread(void *data)
 	ui_timer_spec.it_value.tv_nsec = 0;
 	/* Start one periodic timer to refresh UI based on 30fps */
 	acrn_timer_settime(&vdpy.ui_timer, &ui_timer_spec);
+#endif
 
 	VIRTIO_GPU_DEV_DBG(VIRTIO_GPU_DEV_DBG_INFO, "SDL display thread is created\n");
 	/* Begin to process the display_cmd after initialization */
@@ -1177,7 +1110,9 @@ vdpy_sdl_display_thread(void *data)
 		pthread_mutex_unlock(&vdpy.vdisplay_mutex);
 	} while (1);
 
+#if 1 /* ndef INCLUDE_VIRGLRENDERER_SUPPORT */
 	acrn_timer_deinit(&vdpy.ui_timer);
+#endif
 	/* SDL display_thread will exit because of DM request */
 	pthread_mutex_destroy(&vdpy.vdisplay_mutex);
 	pthread_cond_destroy(&vdpy.vdisplay_signal);
@@ -1511,4 +1446,9 @@ int vdpy_parse_cmd_option(const char *opts, uint32_t channelId)
 	free(stropts);
 
 	return vscrs_num_added;
+}
+
+struct display *vdisplay(void)
+{
+	return (&vdpy);
 }
