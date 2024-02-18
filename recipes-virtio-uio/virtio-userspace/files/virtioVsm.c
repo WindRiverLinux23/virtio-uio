@@ -204,6 +204,7 @@ struct virtioVsm
 	struct virtqueueInfo* pVirtqueueInfo;
 
 	pthread_mutex_t irq_lock;
+	pthread_cond_t irq_bufs_cond;
 	uint32_t irqProd;
 
 	/* irq queue array */
@@ -359,6 +360,7 @@ again:
 				break;
 			}
 
+			pthread_cond_signal(&pDrvCtrl->irq_bufs_cond);
 			VIRTIO_VSM_DBG_MSG(VIRTIO_VSM_DBG_INFO,
 					"recycle one irq request\n");
 		}
@@ -733,10 +735,10 @@ static int virtioVsmNotify(struct virtioVsmQueue *pVsmQueue,
 
 	pIrqQueue = pDrvCtrl->pQueue[VIRTIO_VSM_IRQ_QUEUE];
 
-	if (pIrqQueue->num_free == 0) {
+	while (pIrqQueue->num_free == 0) {
 		log_err("no irq resource available\n");
-		errno = ENOBUFS;
-		return -ENOBUFS;
+		pthread_cond_wait(&pDrvCtrl->irq_bufs_cond,
+				  &pDrvCtrl->irq_lock);
 	}
 
 	irq = &pDrvCtrl->pIrq[pDrvCtrl->irqProd];
@@ -1229,6 +1231,7 @@ int vsm_init(struct virtio_device *vdev)
 	pthread_mutex_init(&pDrvCtrl->pVsmQueue[VIRTIO_VSM_IRQ_QUEUE].int_lock, NULL);
 
 	pthread_mutex_init(&pDrvCtrl->irq_lock, NULL);
+	pthread_cond_init(&pDrvCtrl->irq_bufs_cond, NULL);
 
 	num = virtqueue_get_vring_size(pDrvCtrl->pQueue[pDrvCtrl->queueNum - 1]);
 	pDrvCtrl->pIrq = calloc(num, sizeof(struct virtioVsmIrq));

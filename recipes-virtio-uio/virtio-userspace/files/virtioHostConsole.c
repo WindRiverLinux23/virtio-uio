@@ -1,4 +1,4 @@
-/* virtio_host_console.c - virtio console host device */
+/* virtioHostConsole.c - virtio console host device */
 
 /*
  * Copyright (c) 2024, Wind River Systems, Inc.
@@ -208,6 +208,8 @@ static void* virtioHostConsoleReqDispatch(void *);
 static void virtioHostConsoleReqHandleRx(struct virtioConsolePort *pConsolePort);
 static void* virtioHostConsoleReqHandleTx(void *arg);
 static void* virtioHostConsoleReqHandleControlTx(void *arg);
+static int virtioHostConsoleSetStatus(struct virtioHost* vHost,
+				      uint32_t status);
 
 struct virtioHostOps virtioConsoleHostOps = {
 	.reset    = virtioHostConsoleReset,
@@ -215,6 +217,7 @@ struct virtioHostOps virtioConsoleHostOps = {
 	.reqRead  = virtioHostConsoleCfgRead,
 	.reqWrite = virtioHostConsoleCfgWrite,
 	.show     = virtioHostConsoleShow,
+	.setStatus= virtioHostConsoleSetStatus,
 };
 
 static struct virtioHostDrvInfo HostDrvInfo =
@@ -1292,14 +1295,15 @@ static void virtioHostConsoleReqHandleRx(struct virtioConsolePort *pConsolePort)
 			"n:%d\n", n);
 	if (n == 0) {
 		VIRTIO_CONSOLE_DEV_DBG(VIRTIO_CONSOLE_DEV_DBG_INFO,
-				"no new queue buffer\n");
+				"no new RX queue buffer\n");
+		virtioHostQueueIntrEnable(pQueue);
 		return;
 	}
 
 	if (n < 0) {
 		VIRTIO_CONSOLE_DEV_DBG(VIRTIO_CONSOLE_DEV_DBG_ERR,
 				"failed to get buffer(%d)\n", n);
-		virtioHostConsoleAbort(pQueue, pQueue->availIdx);
+		virtioHostQueueIntrEnable(pQueue);
 		return;
 	}
 
@@ -1308,6 +1312,7 @@ static void virtioHostConsoleReqHandleRx(struct virtioConsolePort *pConsolePort)
 				"invalid length of desc chain: %d, 1 to %d is valid\n",
 				n, VIRTIO_CONSOLE_IO_REQ_MAX);
 
+		virtioHostQueueIntrEnable(pQueue);
 		virtioHostConsoleAbort(pQueue, pQueue->availIdx);
 		return;
 	}
@@ -1324,6 +1329,7 @@ static void virtioHostConsoleReqHandleRx(struct virtioConsolePort *pConsolePort)
 		VIRTIO_CONSOLE_DEV_DBG(VIRTIO_CONSOLE_DEV_DBG_ERR,
 				"failed to read len:%d, %s\n", len, strerror(errno));
 
+		virtioHostQueueIntrEnable(pQueue);
 		virtioHostConsoleAbort(pQueue, pQueue->availIdx);
 
 		/* no data available */
@@ -1344,7 +1350,9 @@ static void virtioHostConsoleReqHandleRx(struct virtioConsolePort *pConsolePort)
 		printf("%02x ", *((char *)bufList[0].buf + i));
 	printf("len: %d\n", len);
 #endif
-	virtioHostConsoleDone(idx, pQueue, len);
+	(void)virtioHostQueueRelBuf(pQueue, idx, len);
+	virtioHostQueueIntrEnable(pQueue);
+	(void)virtioHostQueueNotify(pQueue);
 	return;
 close:
 	virtioConsoleResetBackend(be);
@@ -1386,8 +1394,8 @@ static void* virtioHostConsoleReqHandleTx(void *arg)
 	struct virtioHostQueue *pQueue;
 	struct virtioConsolePort *pPorts;
 	struct virtioConsoleBackend *be = pConsolePort->arg;
-	struct virtioHostBuf bufList[VIRTIO_CONSOLE_IO_REQ_MAX];
-	struct iovec iov[VIRTIO_CONSOLE_IO_REQ_MAX];
+	struct virtioHostBuf buffs;
+	bool doNotify = false;
 
 	pPorts = pConsolePort->txq == 1 ? pConsolePort :
 			pConsolePort - ((pConsolePort->txq / 2) - 1);
@@ -1405,12 +1413,12 @@ static void* virtioHostConsoleReqHandleTx(void *arg)
 		}
 
 		while (1) {
-			n = virtioHostQueueGetBuf(pQueue, &idx, bufList, VIRTIO_CONSOLE_IO_REQ_MAX);
+			n = virtioHostQueueGetBuf(pQueue, &idx, &buffs, 1);
 			VIRTIO_CONSOLE_DEV_DBG(VIRTIO_CONSOLE_DEV_DBG_INFO,
 					"n:%d\n", n);
 			if (n == 0) {
 				VIRTIO_CONSOLE_DEV_DBG(VIRTIO_CONSOLE_DEV_DBG_INFO,
-						"no new queue buffer\n");
+						"no new TX queue buffer\n");
 				break;
 			}
 
@@ -1430,14 +1438,7 @@ static void* virtioHostConsoleReqHandleTx(void *arg)
 				continue;
 			}
 
-			for (i = 0; i < n; i++) {
-				iov[i].iov_base = bufList[i].buf;
-				iov[i].iov_len = bufList[i].len;
-				VIRTIO_CONSOLE_DEV_DBG(VIRTIO_CONSOLE_DEV_DBG_INFO,
-						"len: %d\n", bufList[i].len);
-			}
-
-			ret = writev(be->fd, iov, n);
+			ret = write(be->fd, buffs.buf, buffs.len);
 			if (ret <= 0) {
 				VIRTIO_CONSOLE_DEV_DBG(VIRTIO_CONSOLE_DEV_DBG_ERR,
 						"failed to write ret:%d, %s\n", ret, strerror(errno));
@@ -1469,11 +1470,16 @@ static void* virtioHostConsoleReqHandleTx(void *arg)
 				break;
 			}
 #ifdef VIRTIO_CONSOLE_DEV_DUMP_PACKETS
-			for (i = 0; i < 8; i++)
-				printf("%02x ", *((char *)bufList[0].buf + i));
+			for (i = 0; i < ret; i++)
+				printf("%02x ", *((char *)buffs.buf + i));
 			printf("len: %d\n", ret);
 #endif
-			virtioHostConsoleDone(idx, pQueue, ret);
+			doNotify = true;
+			(void)virtioHostQueueRelBuf(pQueue, idx, ret);
+		}
+		virtioHostQueueIntrEnable(pQueue);
+		if (doNotify) {
+			(void)virtioHostQueueNotify(pQueue);
 		}
 	}
 
@@ -1563,6 +1569,7 @@ static void* virtioHostConsoleReqHandleControlTx(void *arg)
 	struct virtioConsolePort *tmp;
 	struct virtioHostBuf bufList[VIRTIO_CONSOLE_IO_REQ_MAX];
 	struct virtio_console_control resp, *ctrl;
+	bool doNotify = false;
 
 	if (!pConsolePort || pConsolePort->txq != 3) {
 		VIRTIO_CONSOLE_DEV_DBG(VIRTIO_CONSOLE_DEV_DBG_ERR,
@@ -1654,7 +1661,12 @@ static void* virtioHostConsoleReqHandleControlTx(void *arg)
 			}
 		}
 
-		virtioHostConsoleDone(idx, pQueue, total);
+		doNotify = true;
+		(void)virtioHostQueueRelBuf(pQueue, idx, ret);
+	}
+	virtioHostQueueIntrEnable(pQueue);
+	if (doNotify) {
+		(void)virtioHostQueueNotify(pQueue);
 	}
 
 	return NULL;
@@ -1692,6 +1704,7 @@ static void virtioHostConsoleNotify(struct virtioHostQueue *pQueue)
 				pthread_mutex_unlock(&vConsoleHostDrv.dispMtx);
 				return;
 			}
+			virtioHostQueueIntrDisable(pQueue);
 			TAILQ_REMOVE(&vConsoleHostDrv.dispFreeQ, pDispObj, link);
 			pDispObj->pQueue = pQueue;
 			TAILQ_INSERT_TAIL(&vConsoleHostDrv.dispBusyQ, pDispObj, link);
@@ -1861,3 +1874,65 @@ static void virtioHostConsoleShow(struct virtioHost * vHost, uint32_t indent)
 	}
 }
 
+/*******************************************************************************
+ *
+ * virtioHostConsoleSetStatus - initialize virtioHostConsole status
+ *
+ * This routine is used to initialize virtioHostConsole status when
+ * receiving reset signal from guest.
+ *
+ * RETURNS: 0, or -1 if failure raised in process of changing status.
+ *
+ * ERRNO: N/A
+ */
+
+static int virtioHostConsoleSetStatus(struct virtioHost* vHost,
+				      uint32_t status)
+{
+	struct virtioHostQueue* pQueue;
+	struct virtioConsoleHostDev *pConsoleHostDev;
+	struct virtioConsolePort *pPort;
+	struct virtioConsoleHostCtx *pConsoleHostCtx =
+		(struct virtioConsoleHostCtx *)vHost;
+
+	if (!vHost) {
+		VIRTIO_CONSOLE_DEV_DBG(VIRTIO_CONSOLE_DEV_DBG_ERR,
+				       "null vHost\n");
+		return -EINVAL;
+	}
+	VIRTIO_CONSOLE_DEV_DBG(VIRTIO_CONSOLE_DEV_DBG_INFO,
+			   "set status 0x%x\n", status);
+	if ((status & VIRTIO_CONFIG_S_DRIVER_OK) == 0) {
+		return 0;
+	}
+
+	for (uint32_t i = 0; i < pConsoleHostCtx->nports; i++) {
+		pPort = &pConsoleHostCtx->ports[i];
+		if (pPort == NULL) {
+			continue;
+		}
+
+		/*
+		 * We may have received a transmit interrupt prior to the tty
+		 * device putting us in INT mode. If so, process the transmit
+		 * virtqueue now
+		 */
+		pQueue = vHost->pQueue + pPort->txq;
+		(void) virtioHostQueueIntrEnable(pQueue);
+
+		pQueue = vHost->pQueue + pPort->rxq;
+		(void) virtioHostQueueIntrEnable(pQueue);
+        }
+
+	pQueue = vHost->pQueue + pConsoleHostCtx->controlPort.txq;
+	(void) virtioHostQueueIntrEnable(pQueue);
+
+	/*
+	 * Notify driver to make it update the vring used
+	 * event index
+	 */
+	vHost->intStatus = VIRTIO_MMIO_INT_VRING;
+	(void)vHost->pVsmOps->notify(vHost->pVsmQueue,
+				     vHost, vHost->intStatus);
+	return 0;
+}

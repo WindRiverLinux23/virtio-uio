@@ -72,7 +72,7 @@ static uint32_t virtioHostDbgMask = VIRTIO_HOST_DBG_ERR;
 	do {								\
 		if ((virtioHostDbgMask & (mask)) ||			\
 		    ((mask) == VIRTIO_HOST_DBG_ALL)) {			\
-			printf("%d: %s() " fmt, __LINE__, __func__,	\
+		    printf("%d: %s() " fmt, __LINE__, __func__,		\
 			       ##__VA_ARGS__);				\
 			fflush(stdout);					\
 		}							\
@@ -657,7 +657,7 @@ int virtioHostVsmReqKick(struct virtioHost *vHost, uint32_t queueId)
 		if (idx != vHost->pQueue[queueId].availIdx) {
 			break;
 		}
-		usleep(10);
+		usleep(1000);
 	}
 
 	VIRTIO_HOST_DBG_MSG(VIRTIO_HOST_DBG_IOREQ,
@@ -1419,7 +1419,7 @@ int virtioHostConfigNotify(struct virtioHost *vHost)
 		return -1;
 	}
 
-	vHost->intStatus |= VIRTIO_MMIO_INT_CONFIG;
+	vHost->intStatus = VIRTIO_MMIO_INT_CONFIG;
 	return virtioHostNotify(vHost);
 }
 
@@ -2177,7 +2177,7 @@ int virtioHostQueueNotify(struct virtioHostQueue *pQueue)
 		return -1;
 	}
 
-	vHost->intStatus |= VIRTIO_MMIO_INT_VRING;
+	vHost->intStatus = VIRTIO_MMIO_INT_VRING;
 
 	virtio_mb();
 
@@ -2195,7 +2195,6 @@ int virtioHostQueueNotify(struct virtioHostQueue *pQueue)
 		new = pQueue->lastUsedIdx =
 			(uint16_t)host_virtio16_to_cpu(
 				pQueue->vHost, pQueue->vRing.used->idx);
-		virtio_mb();
 		eventIdx = vring_used_event(&pQueue->vRing);
 		VIRTIO_HOST_DBG_MSG(
 			VIRTIO_HOST_DBG_INFO,

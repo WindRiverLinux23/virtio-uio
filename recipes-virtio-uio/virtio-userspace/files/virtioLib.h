@@ -57,7 +57,6 @@ extern "C" {
 #define virtio_wmb()	dmb(ish)
 #define __iomem volatile
 #define virtio_rmb() dmb(ishld)
-#define virtio_wmb() dmb(ishst)
 #define virtio_mb() __sync_synchronize()
 
 #define max(a,b)				\

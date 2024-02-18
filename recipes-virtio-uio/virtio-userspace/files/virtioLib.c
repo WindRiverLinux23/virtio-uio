@@ -669,8 +669,7 @@ int virtqueueAddBuffer(struct virtqueue* pQueue,
         }
 
 	if (pQueue->num_free == 0) {
-		VIRTIO_LIB_DBG_MSG(VIRTIO_LIB_DBG_INFO,
-				   "num_free == 0, no buffers\n");
+		log_err("num_free == 0, no buffers\n");
 		errno = ENOSPC;
 		return -ENOSPC;
         }
@@ -703,10 +702,9 @@ int virtqueueAddBuffer(struct virtqueue* pQueue,
         }
 	else {
 		if (pQueue->num_free < (uint32_t)bufCnt) {
-			VIRTIO_LIB_DBG_MSG(VIRTIO_LIB_DBG_INFO,
-					   "num_free (%d) < bufCnt(%d), "
-					   "no buffers\n",
-					   pQueue->num_free, (uint32_t)bufCnt);
+			log_err("num_free (%d) < bufCnt(%d), "
+				"no buffers\n",
+				pQueue->num_free, (uint32_t)bufCnt);
 			errno = ENOSPC;
 			return -ENOSPC;
 		}
