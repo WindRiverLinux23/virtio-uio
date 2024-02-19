@@ -20,7 +20,7 @@
 # THE SOFTWARE.
 #
 
-FILESEXTRAPATHS:prepend := "${THISDIR}/files:"
+FILESEXTRAPATHS:prepend := "${LAYER_PATH_wr-virtio-uio}/recipes-kernel/linux/files:"
 
 # Add UIO drivers
 SRC_URI:append = " \
