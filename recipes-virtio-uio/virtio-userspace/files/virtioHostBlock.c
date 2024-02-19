@@ -69,7 +69,7 @@
 #define VIRTIO_BLK_DEV_DBG_INFO            0x00000200
 #define VIRTIO_BLK_DEV_DBG_ALL             0xffffffff
 
-static uint32_t virtioBlkDevDbgMask = VIRTIO_BLK_DEV_DBG_ALL;
+static uint32_t virtioBlkDevDbgMask = VIRTIO_BLK_DEV_DBG_ERR;
 
 #undef VIRTIO_BLK_DEV_DBG
 #undef VIRTIO_BLK_DEV_DBG_PRINTF
