@@ -21,7 +21,7 @@
 #
 
 DESCRIPTION      = "UGOS VirtIO userspace driver for HV 3.0"
-LICENSE          = "windriver"
+LICENSE          = "MIT"
 SECTION          = "network"
 LIC_FILES_CHKSUM = "file://COPYING;md5=6bf501cbeeba69b506091e4d20d46f09"
 
