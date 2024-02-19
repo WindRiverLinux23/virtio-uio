@@ -70,3 +70,4 @@ do_install() {
 }
 
 RRECOMMENDS_${PN} += "${PN}"
+COMPATIBLE_MACHINE = "(aptiv-cvc-fl|aptiv-cvc-131|euto-v9-discovery)"

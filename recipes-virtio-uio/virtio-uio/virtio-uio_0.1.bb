@@ -46,4 +46,4 @@ do_install:append() {
 }
 
 RRECOMMENDS_${PN} += "kernel-module-${PN}"
-
+COMPATIBLE_MACHINE = "(aptiv-cvc-fl|aptiv-cvc-131|euto-v9-discovery)"
