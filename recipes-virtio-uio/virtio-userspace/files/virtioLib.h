@@ -54,7 +54,7 @@ extern "C" {
 #define VIRTIO_VSM_CFG_REGION 1
 
 #define dmb(opt) asm volatile("dmb " #opt : : : "memory")
-#define virtio_wmb()	dmb(ish)
+#define virtio_wmb() dmb(ish)
 #define __iomem volatile
 #define virtio_rmb() dmb(ishld)
 #define virtio_mb() __sync_synchronize()
@@ -317,7 +317,7 @@ extern void virtioReadShmRegion(struct virtio_device* vdev,
 extern bool virtqueueIntrEnable(struct virtqueue* pQueue);
 extern void virtqueueIntrDisable(struct virtqueue* pQueue);
 
-extern void virtioDevInit(struct virtio_device* vdev);
+extern int virtioDevInit(struct virtio_device* vdev);
 extern void virtioDevFree(struct virtio_device* vdev);
 extern size_t virtioRegionGet(int ctrl_fd, PHYS_ADDR addr, size_t size,
 			      uint32_t* offset);

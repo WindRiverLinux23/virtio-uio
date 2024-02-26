@@ -79,6 +79,12 @@ while ((false));
 #define VIRTIO_F_RING_INDIRECT_DESC    28
 #define VIRTIO_F_RING_EVENT_IDX        29
 
+
+/*
+ * Pagemap data and functions
+ *
+ * Pagemap is used fot the virtual to guest physical address conversion
+ */
 typedef struct {
 	uint64_t pfn : 55;
 	unsigned int soft_dirty : 1;
@@ -87,7 +93,12 @@ typedef struct {
 	unsigned int present : 1;
 } virtioPagemapEntry;
 
+static int pagemap_fd = -1;
+
 static int vmTranslate(uintptr_t vaddr, uintptr_t* paddr);
+
+static int pagemap_init(void);
+static int pagemap_destroy(void);
 
 /**
  * virtqueue_get_vring_size - return the size of the virtqueue's vring
@@ -114,8 +125,8 @@ uint32_t virtio_read(struct virtio_device *vdev,
 			    uint32_t reg)
 {
 	volatile uint32_t regvalue;
-	virtio_rmb();
 	regvalue = host_readl((uint32_t*)(vdev->dev.base + reg));
+	virtio_rmb();
 	return le32toh(regvalue);
 }
 
@@ -573,7 +584,7 @@ void* virtqueueGetUsedAddr(const struct virtqueue* pQueue)
  * return 0 for success, 1 for failure
  */
 static int pagemap_get_entry(virtioPagemapEntry *entry,
-		      int pagemap_fd, uintptr_t vaddr)
+		      int __pagemap_fd, uintptr_t vaddr)
 {
 	size_t nread;
 	ssize_t ret;
@@ -583,7 +594,7 @@ static int pagemap_get_entry(virtioPagemapEntry *entry,
 	vpn = vaddr / getpagesize();
 	nread = 0;
 	while (nread < sizeof(data)) {
-		ret = pread(pagemap_fd, ((uint8_t*)&data) + nread,
+		ret = pread(__pagemap_fd, ((uint8_t*)&data) + nread,
 			    sizeof(data) - nread,
 			    vpn * sizeof(data) + nread);
 		nread += ret;
@@ -599,7 +610,31 @@ static int pagemap_get_entry(virtioPagemapEntry *entry,
 	return 0;
 }
 
-/* Convert the given virtual address to physical using /proc/PID/pagemap.
+/*
+ * Initialize the pagemap
+ *
+ * Returns 0 on success and -1 on failure
+ */
+static int pagemap_init(void)
+{
+	const char* pagemap_file = "/proc/self/pagemap";
+	pagemap_fd = open(pagemap_file, O_RDONLY);
+	if (pagemap_fd < 0) {
+		return -1;
+	}
+	return 0;
+}
+
+static int pagemap_destroy(void)
+{
+	if (pagemap_fd > 0) {
+		close(pagemap_fd);
+		pagemap_fd = -1;
+	}
+}
+
+/*
+ * Convert the given virtual address to physical using /proc/PID/pagemap.
  *
  * param[out] paddr physical address
  * param[in]  pid   process to convert for
@@ -609,20 +644,13 @@ static int pagemap_get_entry(virtioPagemapEntry *entry,
 static int virt_to_phys_user(uintptr_t *paddr, pid_t pid,
 			     uintptr_t vaddr)
 {
-	char pagemap_file[BUFSIZ];
-	int pagemap_fd;
 	virtioPagemapEntry entry;
-
-	snprintf(pagemap_file, sizeof(pagemap_file),
-		 "/proc/%ju/pagemap", (uintmax_t)pid);
-	pagemap_fd = open(pagemap_file, O_RDONLY);
 	if (pagemap_fd < 0) {
 		return -1;
 	}
 	if (pagemap_get_entry(&entry, pagemap_fd, vaddr)) {
 		return -1;
 	}
-	close(pagemap_fd);
 	*paddr = (entry.pfn * sysconf(_SC_PAGE_SIZE)) +
 		(vaddr % getpagesize());
 	return 0;
@@ -1044,7 +1072,7 @@ void* virtqueueGetBuffer(struct virtqueue* pQueue,
 	VIRTIO_LIB_DBG_MSG(VIRTIO_LIB_DBG_QUEUE,
 			   "start\n");
 
-	virtio_rmb();
+	virtio_mb();
 	if (pQueue->usedIdx == virtio16_to_cpu(pQueue->vdev,
 					       pQueue->vRing.used->idx)) {
 		return NULL;
@@ -1124,13 +1152,16 @@ static int virtioDevGetFeatures(struct virtio_device* vdev)
 /**
  * Initialize VirtIO device internal structures
  * @vdev: virtual device pointer
+ *
+ * @return: 0 on success and -1 on error
  */
-void virtioDevInit(struct virtio_device* vdev)
+int virtioDevInit(struct virtio_device* vdev)
 {
 	TAILQ_INIT(&vdev->queueList);
 	pthread_mutex_init(&vdev->config_lock, NULL);
 	pthread_mutex_init(&vdev->vqs_list_lock, NULL);
 	virtioDevGetFeatures(vdev);
+	return pagemap_init();
 }
 
 /**
@@ -1164,6 +1195,7 @@ void virtioDevFree(struct virtio_device* vdev)
 		free(vdev->queues);
 		vdev->queues = NULL;
 	}
+	pagemap_destroy();
 	VIRTIO_LIB_DBG_MSG(VIRTIO_LIB_DBG_INFO, "done\n");
 }
 

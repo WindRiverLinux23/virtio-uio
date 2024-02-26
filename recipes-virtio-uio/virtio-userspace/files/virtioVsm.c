@@ -1058,7 +1058,11 @@ int vsm_init(struct virtio_device *vdev)
 	}
 
 	/* Set up virtual device */
-	virtioDevInit(vdev);
+	if (virtioDevInit(vdev) < 0) {
+		log_err("VirtIO device initialization failed: %s\n",
+			strerror(errno));
+		return -1;
+	}
 
 	virtio_add_status(vdev, VIRTIO_CONFIG_S_ACKNOWLEDGE);
 

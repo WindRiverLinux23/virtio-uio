@@ -641,8 +641,6 @@ int virtioHostVsmReqKick(struct virtioHost *vHost, uint32_t queueId)
 		return -1;
 	}
 
-	virtio_rmb();
-
 	offset = offsetof(struct vring_avail, idx);
 	pavail = (unsigned char *)vHost->pQueue[queueId].vRing.avail;
 	pidx = (unsigned short *)(pavail + offset);
@@ -652,8 +650,8 @@ int virtioHostVsmReqKick(struct virtioHost *vHost, uint32_t queueId)
 
 	/* FIXME: remove the cycle after the testing */
 	for (i = 0; i < FAKE_KICK_DEBUG_CYCLE; i++) {
-		virtio_rmb();
 		idx = host_virtio16_to_cpu(vHost, host_readw(pidx));
+		virtio_rmb();
 		if (idx != vHost->pQueue[queueId].availIdx) {
 			break;
 		}
