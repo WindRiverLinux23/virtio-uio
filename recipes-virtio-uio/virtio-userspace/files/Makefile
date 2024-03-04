@@ -22,28 +22,48 @@
 
 # UIO driver test Makefile
 
-SRCS = virtioUioTest.c \
-       virtio_host_yaml_parser.c \
-       virtioHostLib.c \
-       virtioVsm.c \
-       virtioLib.c \
-       virtioHostBlock.c \
-       virtioHostNet.c \
-       mevent.c \
-       virtioHostConsole.c
+
+SRCS = \
+    virtioUioTest.c \
+    virtio_host_yaml_parser.c \
+    virtioHostLib.c \
+    virtioVsm.c \
+    virtioLib.c \
+    virtioHostBlock.c \
+    virtioHostNet.c \
+    mevent.c \
+    virtioHostConsole.c
+LDFLAGS += -lyaml -lssl -lcrypto -lpthread
+
+ifeq ($(CONFIG_INCLUDE_HOST_GPU),y)
+SRCS += \
+    gpu/timer.c \
+    gpu/vdisplay_sdl.c \
+    gpu/vdisplay_sdl_gl.c \
+    gpu/virtio_gpu.c \
+    gpu/virtio_gpu_virgl.c \
+    gpu/virtio_host_gpu.c
+CFLAGS += -DINCLUDE_HOST_GPU
+LDFLAGS += \
+    -lpixman-1 -lwayland-client -lGLESv2 -lEGL -lSDL2 -lvirglrenderer -lm
+endif
 
 BINARY = uio_test
 
 OBJS = $(SRCS:.c=.o)
-LIBS = -lyaml -lssl -lcrypto -pthread
+
+.PHONY: all clean distclean
 
 .c.o:
+	@echo CFLAGS = $(CFLAGS)
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 $(BINARY): $(OBJS)
-	$(CC) $(LDFLAGS) -o $@ $(LIBDIR) $^ $(LIBS)
+	@echo LDFLAGS = $(LDFLAGS)
+	$(CC) $^ $(LDFLAGS) -o $@
 
 all: $(BINARY)
+	@echo SRCS = $(SRCS)
 
 clean:
 	@rm -f $(BINARY) $(OBJS)
