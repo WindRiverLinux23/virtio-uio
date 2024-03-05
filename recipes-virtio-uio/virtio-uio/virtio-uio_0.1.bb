@@ -1,7 +1,7 @@
 DESCRIPTION      = "UGOS VirtIO UIO driver for HV 3.0"
 LICENSE          = "MIT"
 SECTION          = "network"
-LIC_FILES_CHKSUM = "file://COPYING;md5=6bf501cbeeba69b506091e4d20d46f09"
+LIC_FILES_CHKSUM = "file://COPYING;md5=6eca9117cbcec085a8840c24adfc3546"
 
 # The inherit of module.bbclass will automatically name module packages with
 # "kernel-module-" prefix as required by the oe-core build environment.
