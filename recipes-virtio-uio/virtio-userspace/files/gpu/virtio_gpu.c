@@ -1,7 +1,7 @@
 /*
  * Copyright (C) OASIS Open 2018. All rights reserved.
  * Copyright (C) 2022 Intel Corporation.
- * Copyright (c) 2024, Wind River Systems, Inc.
+ * Copyright (c) 2024 Wind River Systems, Inc.
  *
  * SPDX-License-Identifier: BSD-3-Clause
  *

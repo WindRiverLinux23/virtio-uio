@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2018-2022 Intel Corporation.
- * Copyright (c) 2024, Wind River Systems, Inc.
+ * Copyright (c) 2024 Wind River Systems, Inc.
  *
  * SPDX-License-Identifier: BSD-3-Clause
  */
