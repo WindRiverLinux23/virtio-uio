@@ -393,4 +393,4 @@ module_exit(virtio_uio_exit);
 
 MODULE_AUTHOR("Dmitriy Korovkin");
 MODULE_DESCRIPTION("UIO driver for userspace VirtIO");
-MODULE_LICENSE("GPL v2");
+MODULE_LICENSE("Dual MIT/GPL");
