@@ -1,7 +1,22 @@
 DESCRIPTION      = "UGOS VirtIO userspace driver for HV 3.0"
 LICENSE          = "MIT"
 SECTION          = "network"
-LIC_FILES_CHKSUM = "file://COPYING;md5=3b144e4366766c513d28d5f614309d25"
+LIC_FILES_CHKSUM = " \
+    file://Makefile;beginline=1;endline=21;md5=13a73f1b45d9a0ba4c1702f0dc025282 \
+    file://mevent.c;beginline=1;endline=22;md5=9d3a60a5d0d872a78d77298655c5987c \
+    file://mevent.h;beginline=1;endline=22;md5=9d3a60a5d0d872a78d77298655c5987c \
+    file://virtioHostBlock.c;beginline=3;endline=23;md5=f6543e0490f594fcadd256b584fe21b0 \
+    file://virtioHostConsole.c;beginline=3;endline=23;md5=f6543e0490f594fcadd256b584fe21b0 \
+    file://virtioHostLib.c;beginline=3;endline=23;md5=f6543e0490f594fcadd256b584fe21b0 \
+    file://virtioHostLib.h;beginline=3;endline=23;md5=f6543e0490f594fcadd256b584fe21b0 \
+    file://virtioHostNet.c;beginline=3;endline=23;md5=f6543e0490f594fcadd256b584fe21b0 \
+    file://virtio_host_parser.h;beginline=3;endline=23;md5=f6543e0490f594fcadd256b584fe21b0 \
+    file://virtio_host_yaml_parser.c;beginline=3;endline=23;md5=f6543e0490f594fcadd256b584fe21b0 \
+    file://virtioLib.c;beginline=3;endline=23;md5=f6543e0490f594fcadd256b584fe21b0 \
+    file://virtioLib.h;beginline=3;endline=23;md5=f6543e0490f594fcadd256b584fe21b0 \
+    file://virtioUioTest.c;beginline=3;endline=23;md5=f6543e0490f594fcadd256b584fe21b0 \
+    file://virtioVsm.c;beginline=3;endline=23;md5=f6543e0490f594fcadd256b584fe21b0 \
+    "
 
 # The inherit of module.bbclass will automatically name module packages with
 # "kernel-module-" prefix as required by the oe-core build environment.
@@ -18,7 +33,6 @@ S  = "${WORKDIR}"
 DEPENDS = "linux-libc-headers virtio-uio libyaml openssl"
 
 SRC_URI = "file://Makefile \
-           file://COPYING \
            file://virtioUioTest.c \
            file://virtioHostLib.h \
            file://virtioHostLib.c \
