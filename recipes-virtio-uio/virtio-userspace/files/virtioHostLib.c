@@ -2046,6 +2046,7 @@ int virtioHostQueueRetBuf(struct virtioHostQueue *pQueue)
 
 	if (!virtioHostQueueReady(pQueue)) {
 		log_err("virtual queue not ready\n");
+		errno = EACCES;
 		return -EACCES;
 	}
 
