@@ -68,6 +68,7 @@
 
 #undef VIRTIO_NET_DEV_DBG_ON
 #ifdef VIRTIO_NET_DEV_DBG_ON
+#undef VIRTIO_NET_DEV_HDR_DUMP
 
 #define VIRTIO_NET_DEV_DBG_OFF             0x00000000
 #define VIRTIO_NET_DEV_DBG_ISR             0x00000001
@@ -76,7 +77,7 @@
 #define VIRTIO_NET_DEV_DBG_INFO            0x00000200
 #define VIRTIO_NET_DEV_DBG_ALL             0xffffffff
 
-static uint32_t virtioNetDevDbgMask = VIRTIO_NET_DEV_DBG_ALL;
+static uint32_t virtioNetDevDbgMask = VIRTIO_NET_DEV_DBG_ERR;
 
 #undef VIRTIO_NET_DEV_DBG
 #define VIRTIO_NET_DEV_DBG(mask, fmt, ...)				\
@@ -118,10 +119,20 @@ while ((false))
 
 #define ETHER_IS_MULTICAST(addr) (*(addr) & 0x01)
 
-#define VIRTIO_HDR_LEN sizeof(struct virtio_net_hdr)
+#define VIRTIO_HDR_LEN sizeof(struct virtio_net_hdr_v1)
+#define VIRTIO_PACKET_LEN_MIN (VIRTIO_HDR_LEN + ETH_ZLEN)
 
 #define VIRTIO_NET_IP "192.168.1.1"
 #define VIRTIO_NET_MASK 24
+
+/*
+ * Increasing MTU to this value makes Linux driver provide larger several
+ * buffers of the page size instead of one buffer suitable for one ethernet
+ * backet. Buffers are of a page size. Increasing the number of buffers
+ * above 10 may cause the buffer memory shortage that leads to the kernel
+ * panic.
+ */
+#define VIRTIO_NET_MTU (getpagesize() * 10)
 
 struct virtioNetConfig
 {
@@ -313,6 +324,14 @@ static int virtioNetTapOpen(char *devname)
 	char tbuf[IFNAMSIZ];
 	int tunfd, rc, macvtap_index;
 	struct ifreq ifr;
+	int off_flags = 0;
+	unsigned long features;
+
+	off_flags |= TUN_F_CSUM;
+	off_flags |= TUN_F_TSO4;
+
+	/* hardcoded for compatibility with VxWorks driver */
+	int vnethdr_len = VIRTIO_HDR_LEN;
 
 	/*Check if tun/tap or macvtap interface is used */
 	if (virtioNetIsMacvtap(devname, &macvtap_index)) {
@@ -335,6 +354,9 @@ static int virtioNetTapOpen(char *devname)
 	memset(&ifr, 0, sizeof(ifr));
 	ifr.ifr_flags = IFF_TAP | IFF_NO_PI | IFF_BROADCAST;
 
+	/* We need VNET header flag for the backend driver functioning */
+	ifr.ifr_flags |= IFF_VNET_HDR;
+
 	if (*devname) {
 		strncpy(ifr.ifr_name, devname, IFNAMSIZ);
 		ifr.ifr_name[IFNAMSIZ - 1] = '\0';
@@ -344,12 +366,29 @@ static int virtioNetTapOpen(char *devname)
 	if (rc < 0) {
 		log_err("tap device %s creation failed: %s\n",
 			devname, strerror(errno));
-		close(tunfd);
-		return -1;
+		goto errout;
 	}
 
 	strncpy(devname, ifr.ifr_name, IFNAMSIZ);
+
+	rc = ioctl(tunfd, TUNSETVNETHDRSZ, &vnethdr_len);
+	if (rc != 0) {
+		log_err("dev: %s: ioctl(TUNSETVNETHDRSZ): %s\n",
+			devname, strerror(errno));
+		goto errout;
+	}
+
+	rc = ioctl(tunfd, TUNSETOFFLOAD, off_flags);
+	if (rc < 0) {
+		log_err("dev: %s: ioctl(TUNSETOFFLOAD): %s\n",
+			devname, strerror(errno));
+		goto errout;
+	}
+
 	return tunfd;
+errout:
+	close(tunfd);
+	return -1;
 }
 
 /*******************************************************************************
@@ -489,6 +528,40 @@ static int virtioNetlinkUp(int netlink_fd, const char *iface_name)
 	return 0;
 }
 
+static int virtioNetlinkSetMtu(int netlink_fd,
+			       const char *iface_name,
+			       unsigned int mtu)
+{
+	struct {
+		struct nlmsghdr nh;
+		struct ifinfomsg iface;
+		char attrbuf[512];
+	} req;
+	struct rtattr *rta;
+
+	memset(&req, 0, sizeof(req));
+	req.nh.nlmsg_len = NLMSG_LENGTH(sizeof(req.iface));
+	req.nh.nlmsg_flags = NLM_F_REQUEST;
+	req.nh.nlmsg_type = RTM_NEWLINK;
+	req.iface.ifi_family = AF_UNSPEC;
+	req.iface.ifi_index = if_nametoindex(iface_name);
+	req.iface.ifi_change = 0xffffffff;
+	rta = (struct rtattr *)(((char *) &req) +
+				NLMSG_ALIGN(req.nh.nlmsg_len));
+	rta->rta_type = IFLA_MTU;
+	rta->rta_len = RTA_LENGTH(sizeof(mtu));
+	req.nh.nlmsg_len = NLMSG_ALIGN(req.nh.nlmsg_len) +
+		RTA_LENGTH(sizeof(mtu));
+	memcpy(RTA_DATA(rta), &mtu, sizeof(mtu));
+
+	if (send(netlink_fd, &req, req.nh.nlmsg_len, 0) == -1) {
+		log_err("interface %s mtu set error: %s\n",
+			iface_name, strerror(errno));
+		return -1;
+	}
+	return 0;
+}
+
 /*******************************************************************************
  *
  * virtioHostNetBeDevCreate - create virtio net backend device
@@ -515,6 +588,7 @@ static int virtioHostNetBeDevCreate(struct virtioNetHostDev *pNetHostDev)
 	}
 
 	memcpy(pNetHostCtx->cfg.mac, pNetHostDev->beDevArgs.mac, ETH_ALEN);
+	pNetHostCtx->cfg.mtu = VIRTIO_NET_MTU;
 
 	/*
 	 * Configure TAP interface
@@ -526,27 +600,36 @@ static int virtioHostNetBeDevCreate(struct virtioNetHostDev *pNetHostDev)
 	ret = virtioNetlinkSetAddrIpv4(netlink_fd, pNetBeDevArgs->tapType,
 				       VIRTIO_NET_IP, VIRTIO_NET_MASK);
 	if (ret != 0) {
-		close(netlink_fd);
-		return -1;
+		goto errout;
+	}
+	ret = virtioNetlinkSetMtu(netlink_fd, pNetBeDevArgs->tapType,
+				  pNetHostCtx->cfg.mtu);
+	if (ret != 0) {
+		goto errout;
 	}
 	ret = virtioNetlinkUp(netlink_fd, pNetBeDevArgs->tapType);
 	if (ret != 0) {
-		close(netlink_fd);
-		return -1;
+		goto errout;
 	}
 	close(netlink_fd);
 
 	/* set device features */
-	pNetHostCtx->feature = (1UL << VIRTIO_F_VERSION_1) |
-		(1UL << VIRTIO_NET_F_MAC) |
-		(1UL << VIRTIO_RING_F_INDIRECT_DESC) |
-		(1UL << VIRTIO_NET_F_STATUS) |
-		(1UL << VIRTIO_RING_F_EVENT_IDX);
-
+	pNetHostCtx->feature = (1UL << VIRTIO_F_VERSION_1)
+		| (1UL << VIRTIO_NET_F_MAC)
+		| (1UL << VIRTIO_RING_F_INDIRECT_DESC)
+		| (1UL << VIRTIO_NET_F_STATUS)
+		| (1UL << VIRTIO_RING_F_EVENT_IDX)
+		| (1UL << VIRTIO_NET_F_CSUM)
+		| (1UL << VIRTIO_NET_F_HOST_TSO4)
+		| (1UL << VIRTIO_NET_F_MTU)
+		;
 	VIRTIO_NET_DEV_DBG(VIRTIO_NET_DEV_DBG_INFO,
 			"pNetHostCtx->feature:0x%lx\n", pNetHostCtx->feature);
 
 	return 0;
+errout:
+	close(netlink_fd);
+	return -1;
 }
 
 /*******************************************************************************
@@ -916,48 +999,40 @@ static void* virtioHostNetReqDispatch(void *my_unused)
 	return NULL;
 }
 
-/**
- * Remove VirtIO header from the ethernet packet before sending it to
- * the tap device
+/*******************************************************************************
  *
- * @buffs: buffers received from virtqueue
- * @niov: pointer to the number fo the buffers
- * @hlen: the VirtIO header length
+ * virtioHostNetBufTapPush - push buffers to the tap device
+ *
+ * This routine pushes received VirtIO buffers to the tap device splitting
+ * them into packets
+ *
+ * RETURNS: number of the bytes pushed to tap device on success and -1 on error
+ *
+ * ERRNO: N/A
  */
-static struct virtioHostBuf* txIovTrim(struct virtioHostBuf *buffs,
-				       int *nbuffs, int hlen)
+static int virtioHostNetBufTapPush(int tapfd,
+				   struct virtioHostBuf bufList[],
+				   int nbufs)
 {
-	struct virtioHostBuf* rbuffs = NULL;
+	struct iovec iov[VIRTIO_NET_IO_REQ_MAX];
+	static char pad[ETH_ZLEN] = { 0 };
+	uint32_t len;
 	int i;
-	int _nbuf = *nbuffs;
-	uint32_t offset = 0;
 
-	for (i = 0; i < _nbuf; i++) {
-		if (buffs[i].len == 0) {
-			/* Why should this happen? */
-			continue;
-		}
-		if (buffs[i].len <= hlen) {
-			/*
-			 * VirtIO header spans across several buffers
-			 */
-			VIRTIO_NET_DEV_DBG(
-				VIRTIO_NET_DEV_DBG_INFO,
-				"buf_len=%u, tlen=%d\n",
-				buffs[i].len, hlen);
-			hlen -= buffs[i].len;
-		} else {
-			/*
-			 * Subtract VirtIO header from the buffer
-			 */
-			rbuffs = &buffs[i];
-			buffs[i].len -= hlen;
-			buffs[i].buf += hlen;
-			*nbuffs -= i;
-			break;
-		}
+	for (len = 0, i = 0; i < nbufs; i++) {
+		iov[i].iov_base = bufList[i].buf;
+		iov[i].iov_len = bufList[i].len;
+		len += bufList[i].len;
 	}
-	return rbuffs;
+	if (len < VIRTIO_PACKET_LEN_MIN) {
+		iov[i].iov_base = pad;
+		iov[i].iov_len = VIRTIO_PACKET_LEN_MIN - len;
+		VIRTIO_NET_DEV_DBG(VIRTIO_NET_DEV_DBG_INFO,
+				   "padding %lu bytes\n",
+				   VIRTIO_PACKET_LEN_MIN - len);
+	}
+	return writev(tapfd, iov,
+		      (len > VIRTIO_PACKET_LEN_MIN) ? nbufs : (nbufs + 1));
 }
 
 /*******************************************************************************
@@ -974,16 +1049,15 @@ static struct virtioHostBuf* txIovTrim(struct virtioHostBuf *buffs,
 
 static void* virtioHostNetTxHandle(void *pNetHostCtx)
 {
-	int n, i, len, ret;
+	int n, i, ret;
 	uint16_t idx;
 	struct virtioHost *vhost;
 	struct virtioNetHostCtx *vNetHostCtx = pNetHostCtx;
 	struct virtioNetHostDev *vNetHostDev;
 	struct virtioHostBuf bufList[VIRTIO_NET_IO_REQ_MAX];
-	struct iovec iov[VIRTIO_NET_IO_REQ_MAX];
-	static char pad[ETH_ZLEN] = { 0 };
-	struct virtioHostBuf* rbuffs;
 	struct virtioHostQueue* txQueue;
+	uint32_t len;
+	int nbuf;
 
 	vhost = (struct virtioHost *)vNetHostCtx;
 	vNetHostDev = (struct virtioNetHostDev *)vNetHostCtx;
@@ -1013,62 +1087,50 @@ static void* virtioHostNetTxHandle(void *pNetHostCtx)
 
 			if (n < 0) {
 				log_err("failed to get buffer(%d)\n", n);
+				virtioHostQueueIntrEnable(txQueue);
 				break;
 			}
 
-			/* Skip the VirtIO header descriptor */
-		        rbuffs = txIovTrim(bufList, &n,
-					   VIRTIO_HDR_LEN + 2);
-			if (rbuffs == NULL) {
-				log_err("received buffers are smaller than "
-					"VirtIO header\n");
-				break;
-			}
-			len = 0;
-			for (i = 0; i < n; i++) {
-                                iov[i].iov_base = rbuffs[i].buf;
-                                iov[i].iov_len = rbuffs[i].len;
-                                len += rbuffs[i].len;
-                        }
-                        if (len < ETH_ZLEN) {
-                                iov[n].iov_base = pad;
-                                iov[n].iov_len = ETH_ZLEN - len;
-				VIRTIO_NET_DEV_DBG(VIRTIO_NET_DEV_DBG_INFO,
-						   "padding %d bytes\n",
-						   ETH_ZLEN - len);
+			for (len = 0, i = 0; i < n; i++) {
+                                len += bufList[i].len;
                         }
 
 			VIRTIO_NET_DEV_DBG(VIRTIO_NET_DEV_DBG_INFO,
-					   "writev %d bytes\n", len);
+					   "tap write %d bytes in %d buffers\n",
+					   len, n);
 
-			ret = writev(vNetHostDev->tapfd, iov,
-				     len < ETH_ZLEN ? n : n + 1);
+#ifdef VIRTIO_NET_DEV_HDR_DUMP
+			for (i = 0; i < VIRTIO_HDR_LEN + 4; i++) {
+				printf("0x%02x ",
+				       *((uint8_t*)bufList[0].buf + i));
+			}
+			printf("\n");
+#endif
+
+			ret = virtioHostNetBufTapPush(vNetHostDev->tapfd,
+						      bufList, n);
 			if (ret < 0) {
-				log_err("failed to writev(%s)\n",
-					strerror(ret));
-				(void) virtioHostQueueRetBuf(txQueue);
-				break;
+				log_err("tap write fail: %s\n",
+					strerror(errno));
+				log_err("buffer %d buffers, len %d\n",
+					n, len);
+				for (i = 0; i < n; i++) {
+					log_err("buf[%d]: buf = %p, len = %d\n",
+						i, bufList[i].buf,
+						bufList[i].len);
+				}
 			}
 
+			/*
+			 * If writev failed, return the buffer and let upper
+			 * level protocols deal with the error
+			 */
 			(void)virtioHostQueueRelBuf(txQueue, idx,
-						    ret + VIRTIO_HDR_LEN);
+						    (ret > 0)? ret : len);
 		}
 	}
 }
 
-/**
- * Fill in VirtIO header
- *
- * @hdr: VirtIO header to fill in
- */
-static void virtioHdr(struct virtio_net_hdr* hdr)
-{
-	//FIXME: do we need to add TCP or UDP header length
-	hdr->hdr_len = ETH_HLEN + sizeof(struct iphdr);
-	hdr->csum_start = ETH_HLEN + sizeof(struct iphdr);
-	hdr->gso_type = VIRTIO_NET_HDR_GSO_NONE;
-	hdr->flags = 0U;
-}
 
 /*******************************************************************************
  *
@@ -1092,10 +1154,7 @@ static void* virtioHostNetRxHandle(void *pNetHostCtx)
 	struct epoll_event eventlist[64];
 	struct virtioHostBuf bufList[VIRTIO_NET_IO_REQ_MAX];
 	struct iovec iov[VIRTIO_NET_IO_REQ_MAX];
-	static char pad[ETH_ZLEN] = { 0 };
-	struct virtio_net_hdr* hdr = NULL;
 	struct virtioHostQueue* rxQueue;
-	const uint32_t hdrLen = VIRTIO_HDR_LEN + 2;
 
 	vhost = (struct virtioHost *)vNetHostCtx;
 	vNetHostDev = (struct virtioNetHostDev *)vNetHostCtx;
@@ -1119,58 +1178,68 @@ static void* virtioHostNetRxHandle(void *pNetHostCtx)
 
 			VIRTIO_NET_DEV_DBG(VIRTIO_NET_DEV_DBG_INFO,
 					   "start\n");
+			while (1) {
+				/* Get one chain of buffers from the virtqueue */
 
-			/* Get one chain of buffers from the virtqueue */
-
-			n = virtioHostQueueGetBuf(rxQueue,
-						  &idx, bufList,
-						  VIRTIO_NET_IO_REQ_MAX);
-			if (n == 0) {
+				n = virtioHostQueueGetBuf(rxQueue,
+							  &idx, bufList,
+							  VIRTIO_NET_IO_REQ_MAX);
+				if (n == 0) {
+					VIRTIO_NET_DEV_DBG(VIRTIO_NET_DEV_DBG_INFO,
+							   "no new queue buffer\n");
+					break;
+				} else if (n < 0) {
+					log_err("failed to get buffer(%d)\n", n);
+					break;
+				}
 				VIRTIO_NET_DEV_DBG(VIRTIO_NET_DEV_DBG_INFO,
-						   "no new queue buffer\n");
+						   "got %d buffers\n", n);
 
+				for (i = 0; i < n; i++) {
+					iov[i].iov_base = bufList[i].buf;
+					iov[i].iov_len = bufList[i].len;
+					VIRTIO_NET_DEV_DBG(
+						VIRTIO_NET_DEV_DBG_INFO,
+						"%d: %p, %u\n",
+						i, bufList[i].buf,
+						bufList[i].len);
+				}
+				ret = readv(vNetHostDev->tapfd, iov, n);
+				if (ret < 0) {
+					if (errno != EAGAIN) {
+						log_err("failed to readv(%s)\n",
+							strerror(errno));
+					}
+					(void) virtioHostQueueRetBuf(rxQueue);
+					break;
+				}
+				VIRTIO_NET_DEV_DBG(
+					VIRTIO_NET_DEV_DBG_INFO,
+					"readv: %d bytes\n", ret);
+#ifdef VIRTIO_NET_DEV_HDR_DUMP
+				for (i = 0; i < VIRTIO_HDR_LEN + 4; i++) {
+					printf("0x%02x ",
+					       *((uint8_t*)bufList[0].buf + i));
+				}
+				printf("\n");
+#endif
+				/*
+				 * Fill the first buffer with the VirtIO
+				 * structure
+				 */
+				(void)virtioHostQueueRelBuf(
+					rxQueue, idx, ret);
+				(void)virtioHostQueueNotify(rxQueue);
+			}
+			VIRTIO_NET_DEV_DBG(VIRTIO_NET_DEV_DBG_INFO,
+					   "done\n");
+			if (n <= 0) {
 				/* Re-enable kick from FE driver */
 				virtioHostQueueIntrEnable(rxQueue);
 				(void)virtioHostQueueNotify(rxQueue);
 				break;
-			} else if (n < 0) {
-				log_err("failed to get buffer(%d)\n", n);
-				break;
 			} else {
-
-				/*
-				 * Fill the first buffet with the VirtIO
-				 * structure
-				 */
-				hdr = (struct virtio_net_hdr *)bufList[0].buf;
-				bzero(hdr, hdrLen);
-				virtioHdr(hdr);
-
-				iov[0].iov_base = bufList[0].buf +
-					hdrLen;
-				iov[0].iov_len = bufList[0].len - hdrLen;
-				for (i = 1; i < n; i++) {
-					iov[i].iov_base = bufList[i].buf;
-					iov[i].iov_len = bufList[i].len;
-				}
-				ret = readv(vNetHostDev->tapfd, iov, n);
-				if (ret < 0) {
-					log_err("failed to readv(%s)\n",
-						strerror(ret));
-					(void) virtioHostQueueRetBuf(rxQueue);
-				} else {
-					VIRTIO_NET_DEV_DBG(
-						VIRTIO_NET_DEV_DBG_INFO,
-						"readv: %d bytes\n",
-						ret);
-					(void)virtioHostQueueRelBuf(
-						rxQueue, idx,
-						ret + hdrLen);
-					virtioHostQueueIntrEnable(rxQueue);
-					(void)virtioHostQueueNotify(rxQueue);
-				}
-				VIRTIO_NET_DEV_DBG(VIRTIO_NET_DEV_DBG_INFO,
-						   "done\n");
+				(void)virtioHostQueueNotify(rxQueue);
 			}
 		}
 	}
