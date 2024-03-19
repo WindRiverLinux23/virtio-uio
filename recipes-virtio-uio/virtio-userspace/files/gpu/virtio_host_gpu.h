@@ -74,7 +74,7 @@ struct virtio_gpu_scanout {
         uint32_t resource_id;
         struct virtio_gpu_rect scanout_rect;
 #ifdef INCLUDE_VIRGLRENDERER_SUPPORT
-	struct cursor *cur_cursor;
+	struct cursor cur_cursor;
 #endif
         pixman_image_t *cur_img;
         struct dma_buf_info *dma_buf;
@@ -90,6 +90,17 @@ struct virtio_gpu_command {
         bool     done;
 	uint32_t resp_type;	
         uint32_t iolen;
+
+#ifdef VIRTIO_GPU_PERF_DBG
+	struct timespec notify;
+	struct timespec process;
+        struct timespec process_done;
+
+	struct timespec lib_call_s;
+	struct timespec lib_call_r;
+	struct timespec lib_start;
+	struct timespec lib_end;
+#endif
 };
 
 struct virtioGpuHostDev {
@@ -105,6 +116,11 @@ struct virtioGpuHostDev {
 		bool is_blob_supported;
 		int scanout_num;
 		struct virtio_gpu_scanout *gpu_scanouts;
+
+#ifdef VIRTIO_GPU_PERF_DBG
+                struct timespec notify;
+#endif
+
         } gpuHostCtx;
 
         struct virtioGpuBeDevArgs {
@@ -127,6 +143,9 @@ extern void virtio_gpu_cmd_gl_process(struct virtioHostQueue *pQueue,
 				      uint16_t idx,
 				      struct virtio_gpu_command *cmd);
 extern int virtio_gpu_virgl_init(void *g);
+extern void fence_timer_cb_call(void *data);
+extern void virtio_gpu_gl_update_cursor_data(uint32_t resource_id,
+                                             void *data);
 #endif
 
 #endif /* __INCvirtioHostGpuh */

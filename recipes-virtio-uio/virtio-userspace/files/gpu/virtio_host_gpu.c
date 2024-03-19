@@ -174,8 +174,10 @@ static void virtioHostGpuNotify(struct virtioHostQueue *pQueue)
  * ERRNO: N/A
  */
 
-static int virtioHostGpuCfgRead(struct virtioHost *vHost, uint64_t address,
-                uint64_t size, uint32_t *pValue)
+static int virtioHostGpuCfgRead(struct virtioHost *vHost, 
+                                uint64_t address,
+                                uint64_t size, 
+                                uint32_t *pValue)
 {
         struct virtioGpuHostCtx *pGpuHostCtx;
         uint8_t *cfgAddr;
@@ -206,8 +208,10 @@ static int virtioHostGpuCfgRead(struct virtioHost *vHost, uint64_t address,
  * ERRNO: N/A
  */
 
-static int virtioHostGpuCfgWrite(struct virtioHost *vHost, uint64_t address,
-                uint64_t size, uint32_t value)
+static int virtioHostGpuCfgWrite(struct virtioHost *vHost, 
+                                 uint64_t address,
+                                 uint64_t size, 
+                                 uint32_t value)
 {
         struct virtioGpuHostCtx *pGpuHostCtx;
         uint8_t *cfgAddr;
@@ -244,7 +248,8 @@ static int virtioHostGpuCfgWrite(struct virtioHost *vHost, uint64_t address,
  * ERRNO: N/A
  */
 
-static void virtioHostGpuShow(struct virtioHost * vHost, uint32_t indent)
+static void virtioHostGpuShow(struct virtioHost * vHost, 
+                              uint32_t indent)
 {
 }
 
@@ -266,8 +271,8 @@ static void virtioHostGpuShow(struct virtioHost * vHost, uint32_t indent)
 */
 
 int virtioHostPhyaddrG2H(struct virtioHost *vHost,
-                        PHYS_ADDR gpaddr,
-                        PHYS_ADDR *hpaddr)
+                         PHYS_ADDR gpaddr,
+                         PHYS_ADDR *hpaddr)
 {
         struct virtio_map_entry *entry;
         uint32_t i;
@@ -331,13 +336,14 @@ static int virtioHostGpuDevCreate(struct virtioGpuHostDev *pGpuHostDev)
 	vhost->pMaps = pGpuBeDevArgs->channel->pMap;
 
 	ret = virtioHostCreate(vhost,
-			VIRTIO_DEV_ANY_ID,
-			VIRTIO_TYPE_GPU,
-			&pGpuHostCtx->feature,
-			VIRTIO_GPU_NM_QUEUES,
-			VIRTIO_GPU_QUEUE_MAX_NUM,
-			0, NULL,
-			&virtioGpuHostOps);
+   			       VIRTIO_DEV_ANY_ID,
+			       VIRTIO_TYPE_GPU,
+			       &pGpuHostCtx->feature,
+			       VIRTIO_GPU_NM_QUEUES,
+			       VIRTIO_GPU_QUEUE_MAX_NUM,
+			       0, 
+			       NULL,
+			       &virtioGpuHostOps);
 	if (ret) {
 		VIRTIO_GPU_DEV_DBG(VIRTIO_GPU_DEV_DBG_ERR,
 				"virtio GPU host context creation failed %d\n",

@@ -29,7 +29,8 @@ static struct display  vdpy = {
 	.s.is_active = false,
 	.s.is_wayland = false,
 	.s.is_x11 = false,
-	.s.n_connect = 0
+	.s.n_connect = 0,
+	.gpu = NULL
 };
 
 typedef enum {
@@ -989,11 +990,13 @@ vdpy_create_vscreen_window(struct vscreen *vscr)
                 VIRTIO_GPU_DEV_DBG(VIRTIO_GPU_DEV_DBG_ERR, "Failed to Create OpenGL context\n");
                 return -1;
         }
+        VIRTIO_GPU_DEV_DBG(VIRTIO_GPU_DEV_DBG_INFO, "Created GL context: winctx=%p\n", vscr->winctx);
+
         vscr->guest_fb.tex = 0;
         vscr->guest_fb.framebuffer = 0;
-#endif
-
-#if 1 /*ndef INCLUDE_VIRGLRENDERER_SUPPORT */
+	vscr->cursor = NULL;
+	vscr->cursor_surface = NULL;
+#else
 	vscr->renderer = SDL_CreateRenderer(vscr->win, -1, 0);
 	if (vscr->renderer == NULL) {
 		VIRTIO_GPU_DEV_DBG(VIRTIO_GPU_DEV_DBG_ERR, "Failed to Create GL_Renderer \n");
@@ -1012,16 +1015,13 @@ vdpy_create_vscreen_window(struct vscreen *vscr)
 	return 0;
 }
 
-static void *
-vdpy_sdl_display_thread(void *data)
+static int
+vdpy_create_vscreen_win(unsigned long startnum)
 {
-	struct vdpy_display_bh *bh;
-	struct itimerspec ui_timer_spec;
-
 	struct vscreen *vscr;
 	int i;
 
-        for (i = 0; i < vdpy.vscrs_num; i++) {
+        for (i = (int)startnum; i < vdpy.vscrs_num; i++) {
                 vscr = vdpy.vscrs + i;
 
                 vdpy_calibrate_vscreen_geometry(vscr);
@@ -1032,17 +1032,48 @@ vdpy_sdl_display_thread(void *data)
                 vscr->info.height = vscr->guest_height;
 
                 if (vdpy_create_vscreen_window(vscr)) {
-                        goto sdl_fail;
+                        return i;
                 }
                 clock_gettime(CLOCK_MONOTONIC, &vscr->last_time);
-        }
+	}
+	return i;
+}
+
+static void
+vdpy_update_vscreen_win(void *data)
+{
+	unsigned long startnm = (unsigned long)data;
+
+	vdpy.vscrs_num = (int)vdpy_create_vscreen_win(startnm);	
+}
+
+static void *
+vdpy_sdl_display_thread(void *data)
+{
+	struct vdpy_display_bh *bh;
+	struct itimerspec ui_timer_spec;
+
+	struct vscreen *vscr;
+	int i;
+
+	if (vdpy_create_vscreen_win(0) < vdpy.vscrs_num - 1) {
+		goto sdl_fail;
+	}
+
         sdl_gl_display_init();
+
+#ifdef INCLUDE_VIRGLRENDERER_SUPPORT
+	/* initialize virglrenderer */
+	if (virtio_gpu_virgl_init(vdpy.gpu)) {
+		goto sdl_fail;
+	}
+#endif
 	pthread_mutex_init(&vdpy.vdisplay_mutex, NULL);
 	pthread_cond_init(&vdpy.vdisplay_signal, NULL);
 	TAILQ_INIT(&vdpy.request_list);
 	vdpy.s.is_active = 1;
 
-#if 0 /* ndef INCLUDE_VIRGLRENDERER_SUPPORT */
+#ifndef INCLUDE_VIRGLRENDERER_SUPPORT
 	vdpy.ui_timer_bh.task_cb = vdpy_sdl_ui_refresh;
 	vdpy.ui_timer_bh.data = &vdpy;
 	vdpy.ui_timer.clockid = CLOCK_MONOTONIC;
@@ -1089,7 +1120,7 @@ vdpy_sdl_display_thread(void *data)
 		pthread_mutex_unlock(&vdpy.vdisplay_mutex);
 	} while (1);
 
-#if 1 /* ndef INCLUDE_VIRGLRENDERER_SUPPORT */
+#ifndef INCLUDE_VIRGLRENDERER_SUPPORT
 	acrn_timer_deinit(&vdpy.ui_timer);
 #endif
 	/* SDL display_thread will exit because of DM request */
@@ -1156,7 +1187,9 @@ bool vdpy_submit_bh(int handle, struct vdpy_display_bh *bh_task)
 
 	if ((bh_task->bh_flag & ACRN_BH_PENDING) == 0) {
 		bh_task->bh_flag |= ACRN_BH_PENDING;
+
 		TAILQ_INSERT_TAIL(&vdpy.request_list, bh_task, link);
+
 		bh_ok = true;
 	}
 	pthread_cond_signal(&vdpy.vdisplay_signal);
@@ -1166,13 +1199,44 @@ bool vdpy_submit_bh(int handle, struct vdpy_display_bh *bh_task)
 }
 
 int
-vdpy_init(int *num_vscreens)
+vdpy_init(void *gpu, int vscrs_num_added, int *num_vscreens)
 {
 	int err, count;
+	int vscrs_num;
+	struct vdpy_display_bh bh_screen;
 
-	if (vdpy.s.n_connect) {
+	if (!gpu) {
+		return -1;
+	}
+ 
+	if (vdpy.gpu) {
+
+		/* add more screens */
+		vscrs_num = vdpy.vscrs_num;
+		bh_screen.task_cb = vdpy_update_vscreen_win;
+		bh_screen.data = (void *)
+				 ((unsigned long)(vdpy.vscrs_num - vscrs_num_added));
+		vdpy_submit_bh(vdpy.s.n_connect, &bh_screen);
+
+		/* wait up to 300ms to see if the screen is updated */
+		count = 0;
+		while ((vscrs_num != vdpy.vscrs_num) && (count < 30)) {
+			usleep(10000);
+			count++;
+		}
+
+		if (vscrs_num == vdpy.vscrs_num) {
+			/* screen successfully updated */
+			if (num_vscreens)
+				*num_vscreens = vdpy.vscrs_num;
+			return vdpy.s.n_connect;
+		}
+		if (num_vscreens)
+			*num_vscreens = 0;
 		return vdpy.s.n_connect;
 	}
+
+	vdpy.gpu = gpu;
 
 	/* start one vdpy_sdl_display_thread to handle the 3D request
 	 * in this dedicated thread. Otherwise the libSDL + 3D doesn't
@@ -1263,7 +1327,7 @@ gfx_ui_init(char *dispMode, uint32_t channelId)
 		}
 
 		if (SDL_Init(SDL_INIT_VIDEO)) {
-			VIRTIO_GPU_DEV_DBG(VIRTIO_GPU_DEV_DBG_ERR, "Failed to init SDL2 system\n");
+			printf("Error: failed to initialize SDL2 system.\n");
 			return -1;
 		}
 
@@ -1334,17 +1398,20 @@ gfx_ui_deinit()
 }
 
 /*
-	Geometry parameter for mode of virtual display (windowed or fullscreen).
-            geometry=<width>x<height>+<x_off>+<y_off> | fullscreen]
-	If it is not set, the virtual display will use 1280x720 resolution in windowed mode.
-
-	<width>  specifies the width of the virtual display window in pixels.
-	<height> specifies the height of the virtual display window in pixels.
-	<x_off>  specifies the x offset of the virtual display window from the upper-left corner of the screen.
-	<y_off>  specifies the y offset of the virtual display window from the upper-left corner of the screen.
-
-	For example: geometry=1280x720+100+50 specifies a window 1280 pixels wide by 720 high, with the top left corner 100 pixels right and 50 pixels down from the top left corner of the screen.
-*/
+ * Geometry parameter for mode of virtual display (windowed or fullscreen).
+ * geometry=<width>x<height>+<x_off>+<y_off> | fullscreen
+ *
+ * <width>  specifies the width of the virtual display window in pixels.
+ * <height> specifies the height of the virtual display window in pixels.
+ * <x_off>  specifies the x offset of the virtual display window from the 
+ *          upper-left corner of the screen.
+ * <y_off>  specifies the y offset of the virtual display window from the 
+ *          upper-left corner of the screen.
+ *
+ * For example: geometry=1280x720+100+50 specifies a window 1280 pixels wide 
+ * by 720 high, with the top left corner 100 pixels right and 50 pixels down 
+ * from the top left corner of the screen.
+ */
 
 int vdpy_parse_cmd_option(const char *opts, uint32_t channelId)
 {
@@ -1427,7 +1494,14 @@ int vdpy_parse_cmd_option(const char *opts, uint32_t channelId)
 	return vscrs_num_added;
 }
 
-struct display *vdisplay(void)
+int
+vdpy_handle(void)
+{
+	return (vdpy.s.n_connect);
+}
+
+struct display *
+vdisplay(void)
 {
 	return (&vdpy);
 }

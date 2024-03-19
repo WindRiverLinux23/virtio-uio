@@ -23,15 +23,17 @@
 #ifndef __INCvirtioHostGpuCfgh
 #define __INCvirtioHostGpuCfgh
 
-#if 0
 #define INCLUDE_VIRGLRENDERER_SUPPORT
-#endif
 
 #define VIRTIO_GPU_MAXSEGS 256
 
 #define CHANNELS_MAX_NUM 16
 
+/* maximum number of scanouts supported by the device */
 #define VSCREEN_MAX_NUM 16
+
+/* maximum number of capability sets supported by the device */
+#define NUM_CAPSETs_MAX 1
 
 #define VIRTIO_GPU_QUEUE_MAX_NUM 256
 
@@ -57,7 +59,7 @@ static uint32_t virtioGpuDevDbgMask = VIRTIO_GPU_DEV_DBG_ALL;
         do {                                                            \
                 if ((virtioGpuDevDbgMask & (mask)) ||                   \
                     ((mask) == VIRTIO_GPU_DEV_DBG_ALL)) {               \
-                        printf("%d: %s: " fmt, __LINE__, __func__,     \
+                        printf("%d: %s: " fmt, __LINE__, __func__,      \
                                ##__VA_ARGS__);                          \
                 }                                                       \
         }                                                               \
@@ -65,5 +67,16 @@ while ((false))
 #else
 #define VIRTIO_GPU_DEV_DBG(...)
 #endif  /* VIRTIO_GPU_DEV_DBG_ON */
+
+
+#undef VIRTIO_GPU_PERF_DBG
+#ifdef VIRTIO_GPU_PERF_DBG
+#define PERF_TIME_INTERVAL 2
+long timespec_diff(struct timespec *t1, struct timespec *t0);
+void perf_update_tm_startproc(uint64_t val);
+void perf_update_tm_process(uint64_t val);
+void perf_update_tm_libgl_call(uint64_t val);
+void perf_update_tm_libgl(uint64_t val);
+#endif
 
 #endif /* __INCvirtioHostGpuCfgh */

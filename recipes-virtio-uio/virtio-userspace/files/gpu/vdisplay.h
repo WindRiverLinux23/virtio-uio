@@ -124,19 +124,6 @@ typedef struct v_dma_buf {
     uint32_t  y;
     uint32_t  width;
     uint32_t  height;
-#if 0
-    uint32_t  stride;
-    uint32_t  fourcc;
-    uint64_t  modifier;
-    uint32_t  texture;
-    uint32_t  backing_width;
-    uint32_t  backing_height;
-    bool      y0_top;
-    void      *sync;
-    int       fence_fd;
-    bool      allow_fences;
-    bool      draw_submitted;
-#endif
 } VDmaBuf;
 
 typedef struct egl_fb {
@@ -144,7 +131,6 @@ typedef struct egl_fb {
     int h;
     GLuint tex;
     GLuint framebuffer;
-    bool delete_tex;
     VDmaBuf *dmabuf;
 } EGL_FB;
 #endif
@@ -180,6 +166,8 @@ struct vscreen {
         EGL_FB guest_fb;
         EGL_FB win_fb;
         bool flag_y_0_top;
+	SDL_Cursor *cursor;
+	SDL_Surface *cursor_surface;
 #endif
 };
 
@@ -201,6 +189,7 @@ struct display {
         SDL_GLContext eglContext;
         EGLDisplay eglDisplay;
         struct egl_display_ops gl_ops;
+        void *gpu;
 };
 
 int pthread_setname_np(pthread_t *thread, const char *name);
@@ -210,7 +199,7 @@ char *strcasestr(const char *haystack, const char *needle);
 
 int vdpy_parse_cmd_option(const char *opts, uint32_t channelId);
 int gfx_ui_init(char *dispMode, uint32_t channelId);
-int vdpy_init(int *num_vscreens);
+int vdpy_init(void *gpu, int vscrs_num_added, int *num_vscreens);
 int vdpy_get_display_info(int handle, int scanout_id, uint32_t channelId, struct display_info *info);
 void vdpy_surface_set(int handle, int scanout_id, struct surface *surf);
 void vdpy_surface_update(int handle, int scanout_id, struct surface *surf);
@@ -227,6 +216,7 @@ void vdpy_destroy_context(void *opaque, void *ctx);
 int  vdpy_make_context_current(void *opaque, int scanout_idx, void *ctx);
 
 #ifdef INCLUDE_VIRGLRENDERER_SUPPORT
+int vdpy_handle(void);
 struct display *vdisplay(void);
 void vdpy_gl_scanout_disable(int handle, int scanout_id);
 void vdpy_gl_scanout_tex_setup(int handle,
@@ -243,6 +233,11 @@ void vdpy_egl_scanout_flush(int handle,
                             uint32_t y0,
                             uint32_t w0,
                             uint32_t h0);
+void vdpy_cursor_update(int handle,
+                            int scanout_id,
+                            uint32_t resource_id,
+                            struct cursor *pcur,
+                            bool move_only);
 #endif /* INCLUDE_VIRGLRENDERER_SUPPORT */
 
 #endif /* _VDISPLAY_H_ */

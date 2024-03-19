@@ -47,9 +47,92 @@ static bool virtio_gpu_init_once = false;
 static int scanout_num = 0;
 static pthread_t mevent_dispatch_td;
 
-#ifdef INCLUDE_VIRGLRENDERER_SUPPORT
-static bool virgl_supported = false;
-#endif
+#ifdef VIRTIO_GPU_PERF_DBG
+
+static int perf_thread_stat = EINVAL;
+static pthread_t perf_thread_td;
+static volatile uint64_t counter;
+static uint64_t tm_startproc;
+static uint64_t tm_process;
+static uint64_t tm_libgl_call;
+static uint64_t tm_libgl;
+
+void perf_update_tm_startproc(uint64_t val)
+{
+	tm_startproc += val;
+}
+
+void perf_update_tm_process(uint64_t val)
+{
+        tm_process += val;
+}
+
+void perf_update_tm_libgl_call(uint64_t val)
+{
+        tm_libgl_call += val;
+}
+
+void perf_update_tm_libgl(uint64_t val)
+{
+        tm_libgl += val;
+}
+
+long timespec_diff(struct timespec *t1,
+	      struct timespec *t0)
+{
+	long dsec;
+	long dnsec;
+
+	dsec = t1->tv_sec - t0->tv_sec;
+	dnsec = t1->tv_nsec - t0->tv_nsec;
+	if (dnsec < 0) {
+		--dsec;
+		dnsec += 1000000000;
+	}
+	return ((dsec * 1000) + (dnsec / 1000000));
+}
+
+static void *perf_thread_fn(void *my_unused)
+{
+	char c;
+	struct timespec last;
+	struct timespec now;
+
+	while (1) {
+		c = getchar();
+		if (c == '0') {
+			counter = 0;
+			tm_startproc = 0;
+			tm_process = 0;
+			tm_libgl_call = 0;
+			tm_libgl = 0;
+
+			printf("\n------ cleared counter ------\n");
+			(void)clock_gettime(CLOCK_MONOTONIC, &last);
+			break;
+		}
+	}
+
+	while (1) {
+
+		sleep(PERF_TIME_INTERVAL);
+
+		(void)clock_gettime(CLOCK_MONOTONIC, &now);
+
+		printf("[%lu]: counter=%lu, tm_startproc=%lu, tm_process=%lu\n", timespec_diff(&now, &last), counter, tm_startproc, tm_process);
+
+                printf("        tm_libgl_call=%lu (%%%lu), tm_libgl=%lu (%%%lu)\n", tm_libgl_call, ((tm_libgl_call * 100)/tm_process), tm_libgl, ((tm_libgl * 100)/tm_process));
+
+		last = now;
+		counter = 0;
+		tm_startproc = 0;
+		tm_process = 0;
+		tm_libgl_call = 0;
+		tm_libgl = 0;
+	}
+}
+
+#endif /* VIRTIO_GPU_PERF_DBG */
 
 void* mevent_dispatch_thread(void *my_unused)
 {
@@ -1156,8 +1239,8 @@ virtio_gpu_bh(void *data)
 	int i;
 	uint16_t idx;
 	bool bsprocessed;
-        struct virtioHostQueue *pQueue = (struct virtioHostQueue *)data;
-        int n_to_get = MIN(pQueue->vRing.num, VIRTIO_GPU_MAXSEGS);
+	struct virtioHostQueue *pQueue = (struct virtioHostQueue *)data;
+	int n_to_get = MIN(pQueue->vRing.num, VIRTIO_GPU_MAXSEGS);
 
 	vGpuHostCtx = (struct virtioGpuHostCtx *)(pQueue->vHost);
 	vhost = (struct virtioHost *)vGpuHostCtx;
@@ -1242,6 +1325,9 @@ virtio_gpu_bh(void *data)
 		}
 
 #ifdef INCLUDE_VIRGLRENDERER_SUPPORT
+#ifdef VIRTIO_GPU_PERF_DBG
+                cmd.notify = vGpuHostCtx->notify;
+#endif
 		virtio_gpu_cmd_gl_process(pQueue, idx, &cmd);
 #else
 
@@ -1297,6 +1383,12 @@ virtio_gpu_notify_queue(struct virtioHostQueue *pQueue)
 
 	gpu = (struct virtioGpuHostCtx *)(pQueue->vHost);
 	gpu->bh.data = pQueue;
+
+#ifdef VIRTIO_GPU_PERF_DBG
+        counter++;
+        (void)clock_gettime(CLOCK_MONOTONIC, &(gpu->notify));
+#endif
+
 	vdpy_submit_bh(gpu->vdpy_handle, &gpu->bh);
 }
 
@@ -1307,12 +1399,37 @@ virtio_gpu_cmd_update_cursor(struct virtio_gpu_command *cmd)
 	struct virtio_gpu_resource_2d *r2d;
 	struct cursor cur;
 	struct virtioGpuHostCtx *gpu;
+#ifdef INCLUDE_VIRGLRENDERER_SUPPORT
+	struct virtio_gpu_scanout *gpu_scanout;
+#endif
 
         VIRTIO_GPU_DEV_DBG(VIRTIO_GPU_DEV_DBG_DBUG,"VIRTIO_GPU_CMD_UPDATE_CURSOR\n");
 
 	gpu = cmd->gpu;
 	memcpy(&req, cmd->iov[0].iov_base, sizeof(req));
+	if (req.pos.scanout_id >= gpu->scanout_num) {
+		VIRTIO_GPU_DEV_DBG(VIRTIO_GPU_DEV_DBG_ERR, "Invalid scanout_id %d\n", req.pos.scanout_id);
+		return;
+	}
 	if (req.resource_id > 0) {
+#ifdef INCLUDE_VIRGLRENDERER_SUPPORT
+		gpu_scanout = gpu->gpu_scanouts + req.pos.scanout_id;
+		gpu_scanout->cur_cursor.x = req.pos.x;
+		gpu_scanout->cur_cursor.y = req.pos.y;
+		gpu_scanout->cur_cursor.hot_x = req.hot_x;
+		gpu_scanout->cur_cursor.hot_y = req.hot_y;
+		if (!gpu_scanout->cur_cursor.data) {
+			gpu_scanout->cur_cursor.data = calloc(1,
+					64 * 64 * sizeof(uint32_t));
+			if (!gpu_scanout->cur_cursor.data) {
+				VIRTIO_GPU_DEV_DBG(VIRTIO_GPU_DEV_DBG_ERR, "calloc error\n");
+				return;
+			}
+		}
+		vdpy_cursor_update(gpu->vdpy_handle, req.pos.scanout_id,
+				   req.resource_id, &(gpu_scanout->cur_cursor), 
+				   false);
+#else
 		r2d = virtio_gpu_find_resource_2d(cmd->gpu, req.resource_id);
 		if (r2d == NULL) {
 			VIRTIO_GPU_DEV_DBG(VIRTIO_GPU_DEV_DBG_ERR, "Illegal resource id %d\n", req.resource_id);
@@ -1328,6 +1445,7 @@ virtio_gpu_cmd_update_cursor(struct virtio_gpu_command *cmd)
 		cur.data = pixman_image_get_data(r2d->image);
 		vdpy_cursor_define(gpu->vdpy_handle, req.pos.scanout_id, &cur);
 		pixman_image_unref(r2d->image);
+#endif
 	}
 }
 
@@ -1336,12 +1454,28 @@ virtio_gpu_cmd_move_cursor(struct virtio_gpu_command *cmd)
 {
 	struct virtio_gpu_update_cursor req;
 	struct virtioGpuHostCtx *gpu;
+#ifdef INCLUDE_VIRGLRENDERER_SUPPORT
+        struct virtio_gpu_scanout *gpu_scanout;
+#endif
 
         VIRTIO_GPU_DEV_DBG(VIRTIO_GPU_DEV_DBG_DBUG,"VIRTIO_GPU_CMD_MOVE_CURSOR\n");
 
 	gpu = cmd->gpu;
 	memcpy(&req, cmd->iov[0].iov_base, sizeof(req));
+	if (req.pos.scanout_id >= gpu->scanout_num) {
+		VIRTIO_GPU_DEV_DBG(VIRTIO_GPU_DEV_DBG_ERR, "Invalid scanout_id %d\n", req.pos.scanout_id);
+		return;
+	}
+
+#ifdef INCLUDE_VIRGLRENDERER_SUPPORT
+	gpu_scanout = gpu->gpu_scanouts + req.pos.scanout_id;
+	gpu_scanout->cur_cursor.x = req.pos.x;
+	gpu_scanout->cur_cursor.y = req.pos.y;
+	vdpy_cursor_update(gpu->vdpy_handle, req.pos.scanout_id, 0,
+			   &(gpu_scanout->cur_cursor), true);
+#else
 	vdpy_cursor_move(gpu->vdpy_handle, req.pos.scanout_id, req.pos.x, req.pos.y);
+#endif
 }
 
 int
@@ -1374,6 +1508,11 @@ virtio_gpu_init(struct virtioGpuHostDev *pGpuHostDev)
 			return -1;
 		}
 
+#ifdef VIRTIO_GPU_PERF_DBG
+		perf_thread_stat = pthread_create(&perf_thread_td, NULL, 
+						  perf_thread_fn, NULL);
+#endif
+
 		/* create a thread for mevent_dispatch */
 		if (pthread_create(&mevent_dispatch_td, NULL,
 			mevent_dispatch_thread, NULL)) {
@@ -1388,10 +1527,12 @@ virtio_gpu_init(struct virtioGpuHostDev *pGpuHostDev)
 		/* prepare the config space */
 		gpu->cfg.events_read = 0;
 		gpu->cfg.events_clear = 0;
-		gpu->cfg.num_scanouts = 0;
-		gpu->cfg.num_capsets = 0;
+		gpu->cfg.num_scanouts = VSCREEN_MAX_NUM;
+		gpu->cfg.num_capsets = NUM_CAPSETs_MAX;
 
 		LIST_INIT(&gpu->r2d_list);
+
+		virtio_gpu_init_once = true;
 	}
 
 	/* initialize gfx ui */
@@ -1402,33 +1543,22 @@ virtio_gpu_init(struct virtioGpuHostDev *pGpuHostDev)
 		goto init_fail;
         }
 
-	gpu->vdpy_handle = vdpy_init(&scanout_num);
-	if ((!gpu->vdpy_handle) || (scanout_num == 0)) {
-		VIRTIO_GPU_DEV_DBG(VIRTIO_GPU_DEV_DBG_ERR, "vdpy_init failed\n");
-		goto init_fail;
-	}
+	if (vscrs_num_added > 0) {
+		gpu->vdpy_handle = vdpy_init((void *)gpu, vscrs_num_added, 
+					     &scanout_num);
+		if ((!gpu->vdpy_handle) || (scanout_num == 0)) {
+			VIRTIO_GPU_DEV_DBG(VIRTIO_GPU_DEV_DBG_ERR, "vdpy_init failed\n");
+			goto init_fail;
+		}
 
-	gpu->scanout_num += vscrs_num_added;
-	gpu->cfg.num_scanouts = gpu->scanout_num;
+		gpu->scanout_num += vscrs_num_added;
+		gpu->cfg.num_scanouts = gpu->scanout_num;
+	}
 
 	VIRTIO_GPU_DEV_DBG(VIRTIO_GPU_DEV_DBG_INFO, "gpu->scanout_num=%d\n",  gpu->scanout_num);
 
-        if (!virtio_gpu_init_once) {
 #ifdef INCLUDE_VIRGLRENDERER_SUPPORT
-                rc = virtio_gpu_virgl_init(gpu);
-                if (rc) {
-                        VIRTIO_GPU_DEV_DBG(VIRTIO_GPU_DEV_DBG_ERR, "virgl init failed: %d.\n", rc);
-                        goto init_fail;
-                }
-                virgl_supported = true;
-#endif
-		virtio_gpu_init_once = true;
-	}
-
-#ifdef INCLUDE_VIRGLRENDERER_SUPPORT
-	if (virgl_supported) {
-		gpu->feature |= 1 << VIRTIO_GPU_F_VIRGL;
-	}
+	gpu->feature |= 1 << VIRTIO_GPU_F_VIRGL;
 #endif
 
 	return 0;
