@@ -1,5 +1,5 @@
 DESCRIPTION      = "UGOS VirtIO UIO driver for HV 3.0"
-LICENSE          = "MIT | GPL-2.0-or-later"
+LICENSE          = "GPL-2.0-or-later"
 SECTION          = "network"
 LIC_FILES_CHKSUM = "file://COPYING;md5=6eca9117cbcec085a8840c24adfc3546"
 
