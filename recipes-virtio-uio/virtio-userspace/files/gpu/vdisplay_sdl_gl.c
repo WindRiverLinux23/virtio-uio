@@ -290,9 +290,15 @@ vdpy_egl_text_fb_setup(struct vscreen *vscr,
 
 	VIRTIO_GPU_DEV_DBG(VIRTIO_GPU_DEV_DBG_DBUG,"%dx%d, guest_fb.framebuffer=%d, tex=0x%x\n", width, height, vscr->guest_fb.framebuffer, tex);
 
+        pthread_mutex_lock(&vscr->dmutex);
+
 	vscr->guest_fb.w = width;
 	vscr->guest_fb.h = height;
 	vscr->guest_fb.tex = tex;
+
+        if (vscr->winctx != lastctx) {
+		SDL_GL_MakeCurrent(vscr->win, vscr->winctx);
+	}
 
 	if (!vscr->guest_fb.framebuffer) {
 		VIRTIO_GPU_DEV_DBG(VIRTIO_GPU_DEV_DBG_DBUG,"glGenFramebuffers: 0x%x\n", vscr->guest_fb.framebuffer);
@@ -308,6 +314,12 @@ vdpy_egl_text_fb_setup(struct vscreen *vscr,
 	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
                               GL_TEXTURE_2D, vscr->guest_fb.tex, 0);
 	VDPY_GL_ERR_WARN(__LINE__);
+
+        pthread_mutex_unlock(&vscr->dmutex);
+
+        if (vscr->winctx != lastctx) {
+                SDL_GL_MakeCurrent(vscr->win, lastctx);
+        }
 }
 
 /*******************************************************************************
@@ -347,104 +359,44 @@ vdpy_gl_scanout_tex_setup(int handle,
 	vscr->h = h;
 	vscr->flag_y_0_top = flag_y_0_top;
 
-	SDL_GL_MakeCurrent(vscr->win, vscr->winctx);
-
 	vdpy_egl_text_fb_setup(vscr, width, height, tex_id);
 
-	if (vscr->winctx != lastctx) {
-		SDL_GL_MakeCurrent(vscr->win, lastctx);
-	}
 }
 
 /*******************************************************************************
  *
  * vdpy_egl_scanout_flush - flush scanout
  *
- * This routine flushed the given scanout
+ * This routine signals for flushing the given scanout
  *
  * RETURNS: N/A
  *
  * ERRNO: N/A
  */
 
-void 
-vdpy_egl_scanout_flush(int handle, 
+void
+vdpy_egl_scanout_flush(int handle,
                        int scanout_id,
-                       uint32_t x0, 
-                       uint32_t y0, 
-                       uint32_t w0, 
+                       uint32_t x0,
+                       uint32_t y0,
+                       uint32_t w0,
                        uint32_t h0)
 {
-	struct vscreen *vscr;
-	int win_w;
-	int win_h;
-	GLuint x1;
-	GLuint y1;
-	GLuint x2;
-	GLuint y2;
-	GLuint w;
-	GLuint h;
+        struct vscreen *vscr;
 
-	VIRTIO_GPU_DEV_DBG(VIRTIO_GPU_DEV_DBG_DBUG, "scanout_id=%d\n", scanout_id);
+        VIRTIO_GPU_DEV_DBG(VIRTIO_GPU_DEV_DBG_DBUG, "scanout_id=%d\n", scanout_id);
 
-	vscr = vdpy_vscreen(handle, scanout_id);
-	if (!vscr) {
-		return;
-	}
+        vscr = vdpy_vscreen(handle, scanout_id);
+        if (!vscr) {
+                return;
+        }
 
-	VIRTIO_GPU_DEV_DBG(VIRTIO_GPU_DEV_DBG_DBUG, "scanout_id=%d: %u, %u, %u, %u\n", scanout_id, x0, y0, w0, h0);
+	vscr->x0 = x0;
+	vscr->y0 = y0;
+	vscr->w0 = w0;
+	vscr->h0 = h0;
 
-	VIRTIO_GPU_DEV_DBG(VIRTIO_GPU_DEV_DBG_DBUG, "guest_fb.framebuffer:%u, win_fb.framebuffer:%u\n", vscr->guest_fb.framebuffer, vscr->win_fb.framebuffer);
-
-	if (!vscr->guest_fb.framebuffer) {
-		return;
-	}
-
-	SDL_GL_MakeCurrent(vscr->win, vscr->winctx);
-
-	SDL_GetWindowSize(vscr->win, &win_w, &win_h);
-	vscr->win_fb.w = win_w;
-	vscr->win_fb.h = win_h;
-	vscr->win_fb.framebuffer = 0;
-
-	x1 = 0;
-	y1 = 0;
-	w = vscr->guest_fb.w;
-	h = vscr->guest_fb.h;
-   
-	VIRTIO_GPU_DEV_DBG(VIRTIO_GPU_DEV_DBG_DBUG, "w (guest_fb.w)=%d, h (guest_fb.h)=%d\n", w, h);
- 
-	glBindFramebuffer(GL_READ_FRAMEBUFFER_NV, vscr->guest_fb.framebuffer);
-	glBindFramebuffer(GL_DRAW_FRAMEBUFFER_NV, vscr->win_fb.framebuffer);
-	VDPY_GL_ERR_WARN(__LINE__);
-
-	VIRTIO_GPU_DEV_DBG(VIRTIO_GPU_DEV_DBG_DBUG, "glViewport: win_fb.w=%u, win_fb.h=%u\n", vscr->win_fb.w, vscr->win_fb.h);
-
-	glViewport(0, 0, vscr->win_fb.w, vscr->win_fb.h);
-	VDPY_GL_ERR_WARN(__LINE__);
-
-	w = (x1 + w) > vscr->guest_fb.w ? vscr->guest_fb.w - x1 : w;
-	h = (y1 + h) > vscr->guest_fb.h ? vscr->guest_fb.h - y1 : h;
-
-	VIRTIO_GPU_DEV_DBG(VIRTIO_GPU_DEV_DBG_DBUG, "w=%u, h=%u, flag_y_0_top=%d\n", w, h, vscr->flag_y_0_top);
-
-	y2 = (!vscr->flag_y_0_top) ? y1 : h + y1;
-	y1 = (!vscr->flag_y_0_top) ? h + y1 : y1;
-	x2 = x1 + w;
-
-	VIRTIO_GPU_DEV_DBG(VIRTIO_GPU_DEV_DBG_DBUG, "glBlitFramebuffer(%u, %u, %u, %u, 0, 0, %u, %u)\n", x1, y1, x2, y2, vscr->win_fb.w, vscr->win_fb.h);
-
-	glBlitFramebuffer(x1, y1, x2, y2,
-                          0, 0, vscr->win_fb.w, vscr->win_fb.h,
-                          GL_COLOR_BUFFER_BIT, GL_LINEAR);
-	VDPY_GL_ERR_WARN(__LINE__);
-
-	VIRTIO_GPU_DEV_DBG(VIRTIO_GPU_DEV_DBG_DBUG, "SDL_GL_SwapWindow\n");
-	SDL_GL_SwapWindow(vscr->win);
-
-	if (vscr->winctx != lastctx) {
-		SDL_GL_MakeCurrent(vscr->win, lastctx);
-	}
+	pthread_cond_signal(&vscr->dsignal);
 }
 
 /*******************************************************************************
@@ -517,6 +469,105 @@ vdpy_cursor_update(int handle,
 	}
 
 	SDL_WarpMouseInWindow(vscr->win, pcur->x, pcur->y);
+}
+
+/*******************************************************************************
+ *
+ * virgl_rend_thread - thread to render data to display
+ *
+ * This routine renders data to display.
+ *
+ * RETURNS: N/A
+ *
+ * ERRNO: N/A
+ */
+
+void *
+virgl_rend_thread(void *data)
+{
+	int win_w;
+	int win_h;
+	GLuint x1;
+	GLuint y1;
+	GLuint x2;
+	GLuint y2;
+	GLuint w;
+	GLuint h;
+        struct vscreen *vscr = (struct vscreen *)data;
+
+#ifdef VIRTIO_GPU_DEV_DBG_ON
+        struct vscreen *vscr_tmp;
+        int scanout_id = 0;
+        struct display *pdsp = vdisplay();
+
+        while (scanout_id < VSCREEN_MAX_NUM) {
+                vscr_tmp = pdsp->vscrs + scanout_id;
+                if (vscr_tmp == vscr) {
+                        break;
+                }
+                scanout_id++;
+        }
+        if (scanout_id >= VSCREEN_MAX_NUM) {
+                VIRTIO_GPU_DEV_DBG(VIRTIO_GPU_DEV_DBG_ERR, "Error: unexpected scanout_id\n");
+        } else {
+                VIRTIO_GPU_DEV_DBG(VIRTIO_GPU_DEV_DBG_INFO, "virtio_virgl_rend_thread is started (scanout_id=%d, vscr=%p)\n", scanout_id, vscr);
+        }
+#endif
+
+        SDL_GetWindowSize(vscr->win, &win_w, &win_h);
+        vscr->win_fb.w = win_w;
+        vscr->win_fb.h = win_h;
+        vscr->win_fb.framebuffer = 0;
+
+	while (1) {
+	        pthread_mutex_lock(&vscr->dmutex);
+	        pthread_cond_wait(&vscr->dsignal, &vscr->dmutex);
+
+		if (!vscr->guest_fb.framebuffer) {
+			pthread_mutex_unlock(&vscr->dmutex);
+			continue;
+		}
+
+		SDL_GL_MakeCurrent(vscr->win, vscr->winctx);
+
+		x1 = 0;
+		y1 = 0;
+		w = vscr->guest_fb.w;
+		h = vscr->guest_fb.h;
+   
+		VIRTIO_GPU_DEV_DBG(VIRTIO_GPU_DEV_DBG_DBUG, "w (guest_fb.w)=%d, h (guest_fb.h)=%d\n", w, h);
+
+		glBindFramebuffer(GL_READ_FRAMEBUFFER_NV, vscr->guest_fb.framebuffer);
+		glBindFramebuffer(GL_DRAW_FRAMEBUFFER_NV, vscr->win_fb.framebuffer);
+		VDPY_GL_ERR_WARN(__LINE__);
+
+		VIRTIO_GPU_DEV_DBG(VIRTIO_GPU_DEV_DBG_DBUG, "glViewport: win_fb.w=%u, win_fb.h=%u\n", vscr->win_fb.w, vscr->win_fb.h);
+
+		glViewport(0, 0, vscr->win_fb.w, vscr->win_fb.h);
+		VDPY_GL_ERR_WARN(__LINE__);
+
+        	w = (x1 + w) > vscr->guest_fb.w ? vscr->guest_fb.w - x1 : w;
+        	h = (y1 + h) > vscr->guest_fb.h ? vscr->guest_fb.h - y1 : h;
+
+        	VIRTIO_GPU_DEV_DBG(VIRTIO_GPU_DEV_DBG_DBUG, "w=%u, h=%u, flag_y_0_top=%d\n", w, h, vscr->flag_y_0_top);
+
+        	y2 = (!vscr->flag_y_0_top) ? y1 : h + y1;
+       		y1 = (!vscr->flag_y_0_top) ? h + y1 : y1;
+        	x2 = x1 + w;
+		VIRTIO_GPU_DEV_DBG(VIRTIO_GPU_DEV_DBG_DBUG, "glBlitFramebuffer(%u, %u, %u, %u, 0, 0, %u, %u)\n", x1, y1, x2, y2, vscr->win_fb.w, vscr->win_fb.h);
+
+		glBlitFramebuffer(x1, y1, x2, y2,
+        	                  0, 0, vscr->win_fb.w, vscr->win_fb.h,
+                	          GL_COLOR_BUFFER_BIT, GL_LINEAR);
+		VDPY_GL_ERR_WARN(__LINE__);
+
+		VIRTIO_GPU_DEV_DBG(VIRTIO_GPU_DEV_DBG_DBUG, "SDL_GL_SwapWindow\n");
+		SDL_GL_SwapWindow(vscr->win);
+
+      		SDL_GL_MakeCurrent(vscr->win, NULL);
+
+        	pthread_mutex_unlock(&vscr->dmutex);
+	}
 }
 
 #endif /*INCLUDE_VIRGLRENDERER_SUPPORT */

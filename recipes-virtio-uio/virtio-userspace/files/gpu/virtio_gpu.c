@@ -1490,8 +1490,8 @@ virtio_gpu_init(struct virtioGpuHostDev *pGpuHostDev)
         gpu = (struct virtioGpuHostCtx *)pGpuHostDev;
 
         gpu->feature = (1UL << VIRTIO_F_VERSION_1) |
-                        (1UL << VIRTIO_RING_F_INDIRECT_DESC) |
-                        (1UL << VIRTIO_GPU_F_EDID);
+                       (1UL << VIRTIO_RING_F_INDIRECT_DESC) |
+                       (1UL << VIRTIO_GPU_F_EDID);
 
         gpu->is_blob_supported = vdpy_blob_support();
         if (gpu->is_blob_supported) {

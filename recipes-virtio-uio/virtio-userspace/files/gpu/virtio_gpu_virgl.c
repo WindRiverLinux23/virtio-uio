@@ -53,6 +53,7 @@ struct fenceq_entry {
 	uint16_t idx;
 	struct virtio_gpu_command cmd;
 	void *pResp;
+	void *pMem;
 };
 static TAILQ_HEAD(tailhead, fenceq_entry) fenceq_head;
 
@@ -176,6 +177,10 @@ virgl_write_fence(void *opaq,
 
 		cmd->resp_type = VIRTIO_GPU_RESP_OK_NODATA;
 		virtio_gpu_cmd_gl_response(np->pQueue, np->idx, cmd, np->pResp);
+
+		if (np->pMem) {
+			free(np->pMem);
+		}
 
 		TAILQ_REMOVE(&fenceq_head, np, entries);
 		free(np);
@@ -530,11 +535,11 @@ virtio_gpu_cmd_gl_resource_2d_create(struct virtio_gpu_command *cmd)
 #endif
 
 	if (ret == -ENOMEM) {
-		VIRTIO_GPU_DEV_DBG(VIRTIO_GPU_DEV_DBG_ERR, "%s: memory allocation failed.\n", __func__);
+		VIRTIO_GPU_DEV_DBG(VIRTIO_GPU_DEV_DBG_ERR, "memory allocation failed.\n");
 		cmd->resp_type = VIRTIO_GPU_RESP_ERR_OUT_OF_MEMORY;
 		goto response;
 	} else if (ret) {
-		VIRTIO_GPU_DEV_DBG(VIRTIO_GPU_DEV_DBG_ERR, "%s: invalid parameter(s) specified.\n", __func__);
+		VIRTIO_GPU_DEV_DBG(VIRTIO_GPU_DEV_DBG_ERR, "invalid parameter(s) specified.\n");
 		cmd->resp_type = VIRTIO_GPU_RESP_ERR_INVALID_PARAMETER;
 		goto response;
 	}
@@ -897,7 +902,7 @@ virtio_gpu_cmd_gl_transfer_from_host_3d(struct virtio_gpu_command *cmd)
  */
 
 static void
-virtio_gpu_cmd_gl_3d_submit(struct virtio_gpu_command *cmd)
+virtio_gpu_cmd_gl_3d_submit(struct virtio_gpu_command *cmd, void **pMem)
 {
 	struct virtio_gpu_cmd_submit *req;
 	void *buf;
@@ -919,6 +924,8 @@ virtio_gpu_cmd_gl_3d_submit(struct virtio_gpu_command *cmd)
 #ifdef VIRTIO_GPU_PERF_DBG
         (void)clock_gettime(CLOCK_MONOTONIC, &(cmd->lib_call_r));
 #endif
+
+	*pMem = buf;
 }
 
 /*******************************************************************************
@@ -1237,9 +1244,11 @@ virtio_gpu_cmd_gl_process(struct virtioHostQueue *pQueue,
 			  struct virtio_gpu_command *cmd)
 {
 	struct fenceq_entry *pfent;
+	void *pMem;
 
 	cmd->done = false;
 	cmd->resp_type = 0;
+	pMem = NULL;
 
 #ifdef VIRTIO_GPU_PERF_DBG
         (void)clock_gettime(CLOCK_MONOTONIC, &(cmd->process));
@@ -1265,7 +1274,7 @@ virtio_gpu_cmd_gl_process(struct virtioHostQueue *pQueue,
 		break;
 
 	case VIRTIO_GPU_CMD_SUBMIT_3D:
-		virtio_gpu_cmd_gl_3d_submit(cmd);
+		virtio_gpu_cmd_gl_3d_submit(cmd, &pMem);
 		break;
 
 	case VIRTIO_GPU_CMD_TRANSFER_TO_HOST_2D:
@@ -1346,6 +1355,7 @@ virtio_gpu_cmd_gl_process(struct virtioHostQueue *pQueue,
 	pfent->idx = idx;
 	memcpy((void *)&pfent->cmd, (void *)cmd, sizeof(struct virtio_gpu_command));
 	pfent->pResp = (void*)(cmd->iov[cmd->iovcnt - 1].iov_base);
+	pfent->pMem = pMem;
 
 	TAILQ_INSERT_TAIL(&fenceq_head, pfent, entries);
 

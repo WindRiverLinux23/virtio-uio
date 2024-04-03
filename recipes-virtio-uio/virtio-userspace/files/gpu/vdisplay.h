@@ -161,6 +161,10 @@ struct vscreen {
         /* Record the update_time that is activated from guest_vm */
         struct timespec last_time;
 #ifdef INCLUDE_VIRGLRENDERER_SUPPORT
+	pthread_mutex_t dmutex;
+	pthread_cond_t dsignal;
+        pthread_t virgl_thread_td;
+	uint32_t x0, y0, w0, h0;
         SDL_GLContext winctx;
         int x, y, w, h;
         EGL_FB guest_fb;
@@ -238,6 +242,8 @@ void vdpy_cursor_update(int handle,
                             uint32_t resource_id,
                             struct cursor *pcur,
                             bool move_only);
+void *virgl_rend_thread(void *data);
+
 #endif /* INCLUDE_VIRGLRENDERER_SUPPORT */
 
 #endif /* _VDISPLAY_H_ */

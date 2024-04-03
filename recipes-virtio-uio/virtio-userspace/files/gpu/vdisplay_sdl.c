@@ -984,6 +984,16 @@ vdpy_create_vscreen_window(struct vscreen *vscr)
 			vscr->org_x, vscr->org_y, vscr->width, vscr->height);
 
 #ifdef INCLUDE_VIRGLRENDERER_SUPPORT
+	if (pthread_mutex_init(&vscr->dmutex, NULL) != 0) {
+		VIRTIO_GPU_DEV_DBG(VIRTIO_GPU_DEV_DBG_ERR, "Error: pthread_mutex_init\n");
+		return -1;
+	}
+
+	if (pthread_cond_init(&vscr->dsignal, NULL) != 0) {
+		VIRTIO_GPU_DEV_DBG(VIRTIO_GPU_DEV_DBG_ERR, "Error: pthread_cond_init\n");
+		return -1;
+	}
+
 	vscr->winctx = SDL_GL_CreateContext(vscr->win);
         if (vscr->winctx == NULL) {
 		SDL_DestroyWindow(vscr->win);
@@ -991,6 +1001,13 @@ vdpy_create_vscreen_window(struct vscreen *vscr)
                 return -1;
         }
         VIRTIO_GPU_DEV_DBG(VIRTIO_GPU_DEV_DBG_INFO, "Created GL context: winctx=%p\n", vscr->winctx);
+
+        if (pthread_create(&vscr->virgl_thread_td, NULL, 
+	    virgl_rend_thread, (void *)vscr)) {
+                VIRTIO_GPU_DEV_DBG(VIRTIO_GPU_DEV_DBG_ERR, "Failed to create the virgl_rend_thread.\n");
+                return -1;
+        }
+	VIRTIO_GPU_DEV_DBG(VIRTIO_GPU_DEV_DBG_INFO, "Created virgl_rend_thread: vscr=%p\n", vscr);
 
         vscr->guest_fb.tex = 0;
         vscr->guest_fb.framebuffer = 0;

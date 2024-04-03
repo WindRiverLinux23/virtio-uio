@@ -120,6 +120,9 @@ static int virtioHostGpuReset(struct virtioHost *vHost)
 {
         struct virtioGpuHostCtx *vGpuHostCtx;
 
+	VIRTIO_GPU_DEV_DBG(VIRTIO_GPU_DEV_DBG_INFO, 
+		"________Guest reset________\n");
+
         vGpuHostCtx = (struct virtioGpuHostCtx *)vHost;
         if (!vGpuHostCtx) {
                 VIRTIO_GPU_DEV_DBG(VIRTIO_GPU_DEV_DBG_ERR,
