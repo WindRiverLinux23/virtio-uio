@@ -55,6 +55,7 @@
 #include <net/ethernet.h>
 #include <netinet/ether.h>
 #include <netinet/ip.h>
+#include <netinet/tcp.h>
 #include "virtioHostLib.h"
 #include <syslog.h>
 
@@ -75,6 +76,7 @@
 #define VIRTIO_NET_DEV_DBG_ARGS            0x00000020
 #define VIRTIO_NET_DEV_DBG_ERR             0x00000100
 #define VIRTIO_NET_DEV_DBG_INFO            0x00000200
+#define VIRTIO_NET_DEV_DBG_CSUM            0x00000400
 #define VIRTIO_NET_DEV_DBG_ALL             0xffffffff
 
 static uint32_t virtioNetDevDbgMask = VIRTIO_NET_DEV_DBG_ERR;
@@ -1131,6 +1133,93 @@ static void* virtioHostNetTxHandle(void *pNetHostCtx)
 	}
 }
 
+/*******************************************************************************
+ *
+ * virtioHostCalcTcpUdpCsum - calculate checksum for UDP or TCP packages
+ *
+ * This routine calculates checksum for UDP or TCP packets contained in
+ * provided buffer buf with length len.
+ *
+ * The function assumes that the buffer starts with virtio network header
+ * followed by ethernet header, then IP header then TCP or UDP header and
+ * data.
+ *
+ * RETURNS: checksum value or 0 if the packet does not require it or the
+ * checksum can not be calculated correctly
+ *
+ * ERRNO: N/A
+ */
+
+static uint16_t virtioHostCalcTcpUdpCsum(void* buf, size_t len)
+{
+	struct virtio_net_hdr_v1* vnethdr =
+		(struct virtio_net_hdr_v1*)buf;
+
+	void* ethPkt = buf + VIRTIO_HDR_LEN;
+	struct iphdr* ip = (struct iphdr*)(ethPkt + ETH_HLEN);
+	void* tcpData = ethPkt + vnethdr->csum_start;
+	uint16_t* pCsum =  (uint16_t*)(tcpData + vnethdr->csum_offset);
+	uint32_t csum = 0;
+	uint16_t origcsum;
+	uint16_t ipHdrLen = sizeof(uint32_t) * ip->ihl;
+        uint16_t tcpLen = ntohs(ip->tot_len) - ipHdrLen;
+	uint16_t* tcpPacket = (uint16_t*)tcpData;
+
+	if ((vnethdr->flags & VIRTIO_NET_HDR_F_NEEDS_CSUM) == 0) {
+		return 0;
+	}
+
+	/*
+	 * Verify that offsets are calculated correctly.
+	 * Needs to be checked if any of the offset value calculation
+	 * is changed.
+	 */
+	if ((VIRTIO_HDR_LEN + vnethdr->csum_start) !=
+	    (VIRTIO_HDR_LEN + ETH_HLEN + ipHdrLen)) {
+		log_err("VIRTIO_HDR_LEN + vnethdr->csum_start (%ld) != "
+			"VIRTIO_HDR_LEN + ETH_HLEN + ipHdrLen (%ld)\n",
+			VIRTIO_HDR_LEN + vnethdr->csum_start,
+			VIRTIO_HDR_LEN + ETH_HLEN + ipHdrLen);
+		return 0;
+	}
+
+	if (ip->protocol != IPPROTO_TCP &&
+	    ip->protocol != IPPROTO_UDP) {
+		return *pCsum;
+	}
+	csum += ((ip->saddr >> 16) & 0xFFFF) + ((ip->saddr) & 0xFFFF);
+	csum += ((ip->daddr >> 16) & 0xFFFF) + ((ip->daddr) & 0xFFFF);
+	csum += htons((uint16_t)(ip->protocol));
+	csum += htons(tcpLen);
+	origcsum = *pCsum;
+	*pCsum = 0;
+	while (tcpLen > 1) {
+		csum += *tcpPacket++;
+		tcpLen -= sizeof(uint16_t);
+	}
+
+	/* if any bytes left, pad the bytes and add */
+	if(tcpLen > 0) {
+		csum += ((*tcpPacket) & htons(0xFF00));
+	}
+
+	/* Fold 32-bit sum to 16 bits: add carrier to result */
+	while ((csum >> 16) != 0) {
+		csum = (csum & 0xFFFF) + (csum >> 16);
+	}
+	csum = ~csum;
+	if ((ip->protocol == IPPROTO_UDP) && csum == 0x0000) {
+		csum = 0xFFFF;
+	}
+	*pCsum = csum;
+	VIRTIO_NET_DEV_DBG(VIRTIO_NET_DEV_DBG_CSUM,
+			   "csum start: %d offset: %d, "
+			   "csum: 0x%04x / 0x%04x\n",
+			   vnethdr->csum_start, vnethdr->csum_offset,
+			   ntohs(origcsum),
+			   ntohs(csum));
+        return *pCsum;
+}
 
 /*******************************************************************************
  *
@@ -1223,6 +1312,8 @@ static void* virtioHostNetRxHandle(void *pNetHostCtx)
 				}
 				printf("\n");
 #endif
+				(void)virtioHostCalcTcpUdpCsum(bufList[0].buf,
+							       bufList[0].len);
 				/*
 				 * Fill the first buffer with the VirtIO
 				 * structure
