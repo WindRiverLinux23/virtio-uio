@@ -7,7 +7,7 @@ LIC_FILES_CHKSUM = "file://COPYING;md5=6eca9117cbcec085a8840c24adfc3546"
 # "kernel-module-" prefix as required by the oe-core build environment.
 inherit module
 
-PKG_name = "kernel-module-${PN}"
+PKG:name = "kernel-module-${PN}"
 
 PR = "r0"
 PV = "0.1"
@@ -23,5 +23,5 @@ do_install:append() {
   install -m 0644 uio-virtio.h ${D}${includedir} 
 }
 
-RRECOMMENDS_${PN} += "kernel-module-${PN}"
+RRECOMMENDS:${PN} += "kernel-module-${PN}"
 COMPATIBLE_MACHINE = "(aptiv-cvc-fl|aptiv-cvc-131|euto-v9-discovery)"

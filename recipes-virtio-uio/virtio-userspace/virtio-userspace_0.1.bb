@@ -35,10 +35,10 @@ LIC_FILES_CHKSUM = " \
 # "kernel-module-" prefix as required by the oe-core build environment.
 
 inherit systemd
-SYSTEMD_SERVICE_${PN} = "virtio-userspace.service"
+SYSTEMD_SERVICE:${PN} = "virtio-userspace.service"
 
 DEPENDS += "libyaml linux-libc-headers openssl virtio-uio"
-DEPENDS_append_euto-v9-discovery = " \
+DEPENDS:append:euto-v9-discovery = " \
     libsdl2 sgpu-userspace pixman virglrenderer wayland"
 
 PR = "r0"
@@ -76,14 +76,14 @@ SRC_URI = "file://Makefile \
 
 S = "${WORKDIR}"
 
-EXTRA_OEMAKE_append_euto-v9-discovery = " CONFIG_INCLUDE_HOST_GPU=y"
-TARGET_CFLAGS_append_euto-v9-discovery = " ${@bb.utils.contains("DISTRO_FEATURES", "x11", "", "-DEGL_NO_X11 ", d)}"
-TARGET_CXXFLAGS_append_euto-v9-discovery = " ${@bb.utils.contains("DISTRO_FEATURES", "x11", "", "-DEGL_NO_X11 ", d)}"
+EXTRA_OEMAKE:append:euto-v9-discovery = " CONFIG_INCLUDE_HOST_GPU=y"
+TARGET_CFLAGS:append:euto-v9-discovery = " ${@bb.utils.contains("DISTRO_FEATURES", "x11", "", "-DEGL_NO_X11 ", d)}"
+TARGET_CXXFLAGS:append:euto-v9-discovery = " ${@bb.utils.contains("DISTRO_FEATURES", "x11", "", "-DEGL_NO_X11 ", d)}"
 
 # The header files of pixman library package is located at non-standard
 # location as defined by STAGING_INCDIR. So, we manually specify the location
 # to look for these header files.
-TARGET_CFLAGS_append_euto-v9-discovery = " -I${STAGING_INCDIR}/pixman-1"
+TARGET_CFLAGS:append:euto-v9-discovery = " -I${STAGING_INCDIR}/pixman-1"
 
 do_install() {
   install -d ${D}${bindir}
