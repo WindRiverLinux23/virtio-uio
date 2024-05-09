@@ -1135,35 +1135,162 @@ static void* virtioHostNetTxHandle(void *pNetHostCtx)
 
 /*******************************************************************************
  *
+ * virtioMtuUpdate - updates MTU for the interface
+ *
+ * This routine updates MTU on the interface
+ *
+ * RETURNS: 0 on success and -1 on error
+ *
+ * ERRNO: N/A
+ */
+static int virtioMtuUpdate(const char *iface_name, unsigned int mtu)
+{
+	int ret = -1;
+	int netlink_fd = -1;
+
+	netlink_fd = virtioNetlinkConnect();
+	if (netlink_fd < 0) {
+		log_err("failed to connect to netlink to %s\n",
+			strerror(errno));
+	        goto exit;
+	}
+	ret = virtioNetlinkSetMtu(netlink_fd, iface_name, mtu);
+	if (ret != 0) {
+		log_err("failed to update MTU to %d: %s\n",
+			mtu, strerror(errno));
+		goto exit;
+	}
+	ret = virtioNetlinkUp(netlink_fd, iface_name);
+	if (ret != 0) {
+		log_err("failed to bring %s up: %s\n",
+			iface_name, strerror(errno));
+	}
+exit:
+	if (netlink_fd > 0) {
+		close(netlink_fd);
+	}
+	return ret;
+}
+
+/*******************************************************************************
+ *
+ * findAddr - return address in the multibuffer array
+ *
+ * The function returns a pointer to the data in a multibuffer array bufList,
+ * containing n buffers. The pointer is specified by the new_offset, an offset
+ * from the previous pointer located in the buffer pointed by bufIdx and
+ * the old_offset, and offset from the beginning of the buffer.
+ *
+ * The function returns the pointer to the data or NULL if the new_offset
+ * points beyond the array of the buffers.
+ *
+ * Function updates bufIdx with the value of the new buffer index and
+ * new_offset as the offset from the start of the buffer.
+ *
+ * ERRNO: N/A
+ */
+
+static void* findAddr(struct virtioHostBuf* bufList, int n, int* bufIdx,
+		      uint32_t old_offset, uint32_t* new_offset)
+{
+	int i;
+	void* address;
+	uint32_t l_offset = old_offset + *new_offset;
+
+	for (i = *bufIdx; i < n && l_offset > bufList[i].len; i++) {
+		l_offset -= bufList[i].len;
+	}
+	if (i >= n) {
+		return NULL;
+	}
+	address = bufList[i].buf + l_offset;
+	*bufIdx = i;
+	*new_offset = l_offset;
+	return address;
+}
+
+/*******************************************************************************
+ *
  * virtioHostCalcTcpUdpCsum - calculate checksum for UDP or TCP packages
  *
  * This routine calculates checksum for UDP or TCP packets contained in
- * provided buffer buf with length len.
+ * provided list of buffers bufList size n with total length len.
  *
  * The function assumes that the buffer starts with virtio network header
  * followed by ethernet header, then IP header then TCP or UDP header and
  * data.
  *
- * RETURNS: checksum value or 0 if the packet does not require it or the
- * checksum can not be calculated correctly
+ * While the function handles an array of the buffers, it assumes that
+ * the IP header is located each in a buffer and not splitted into multiple
+ * buffers, so the members of the structure can be directly accessed without
+ * additional address calculations.
+ *
+ * RETURNS: checksum value or 0 if the packet does not require it
+ * and -EINVAL if the checksum can not be calculated correctly and -EMSGSIZE
+ * in case the if the provided VirtIO buffer is less than the TCP/UDP packet
+ * length
  *
  * ERRNO: N/A
  */
 
-static uint16_t virtioHostCalcTcpUdpCsum(void* buf, size_t len)
+static int virtioHostCalcTcpUdpCsum(struct virtioHostBuf* bufList,
+				    int n, size_t len)
 {
-	struct virtio_net_hdr_v1* vnethdr =
-		(struct virtio_net_hdr_v1*)buf;
-
-	void* ethPkt = buf + VIRTIO_HDR_LEN;
-	struct iphdr* ip = (struct iphdr*)(ethPkt + ETH_HLEN);
-	void* tcpData = ethPkt + vnethdr->csum_start;
-	uint16_t* pCsum =  (uint16_t*)(tcpData + vnethdr->csum_offset);
 	uint32_t csum = 0;
 	uint16_t origcsum;
-	uint16_t ipHdrLen = sizeof(uint32_t) * ip->ihl;
-        uint16_t tcpLen = ntohs(ip->tot_len) - ipHdrLen;
-	uint16_t* tcpPacket = (uint16_t*)tcpData;
+	struct virtio_net_hdr_v1* vnethdr =
+		(struct virtio_net_hdr_v1*)bufList[0].buf;
+
+	void* ethPkt;
+	uint32_t eth_offset;
+	int ethIdx = 0;
+	struct iphdr* ip;
+	void* tcpData;
+	uint16_t* pCsum;
+	uint16_t ipHdrLen;
+        uint16_t tcpLen;
+	uint16_t* tcpPacket;
+	uint32_t tcp_offset;
+	int tcpBufIdx = 0;
+	int bufIdx = 0;
+	int bufLen;
+	uint32_t offset;
+
+	offset = VIRTIO_HDR_LEN;
+	ethPkt = findAddr(bufList, n, &bufIdx, 0, &offset);
+	if (ethPkt == NULL) {
+		log_err("Ethernet packet address error\n");
+		return -EINVAL;
+	}
+	eth_offset = offset;
+	ethIdx = bufIdx;
+
+	offset = ETH_HLEN;
+	ip = (struct iphdr*)findAddr(bufList, n, &bufIdx, eth_offset, &offset);
+	if (ip == NULL) {
+		log_err("IP packet address error\n");
+		return -EINVAL;
+	}
+
+	bufIdx = ethIdx;
+	offset = vnethdr->csum_start;
+	tcpData = findAddr(bufList, n, &bufIdx, eth_offset, &offset);
+	if (tcpData == NULL) {
+		log_err("TCP/UDP packet address error\n");
+		return -EINVAL;
+	}
+	tcp_offset = offset;
+	tcpBufIdx = bufIdx;
+
+	offset = vnethdr->csum_offset;
+	pCsum = (uint16_t*)findAddr(bufList, n, &bufIdx, tcp_offset, &offset);
+	if (pCsum == NULL) {
+		log_err("TCP/UDP checksum address error\n");
+		return -EINVAL;
+	}
+	ipHdrLen = sizeof(uint32_t) * ip->ihl;
+	tcpLen = ntohs(ip->tot_len) - ipHdrLen;
+	tcpPacket = (uint16_t*)tcpData;
 
 	if ((vnethdr->flags & VIRTIO_NET_HDR_F_NEEDS_CSUM) == 0) {
 		return 0;
@@ -1180,27 +1307,70 @@ static uint16_t virtioHostCalcTcpUdpCsum(void* buf, size_t len)
 			"VIRTIO_HDR_LEN + ETH_HLEN + ipHdrLen (%ld)\n",
 			VIRTIO_HDR_LEN + vnethdr->csum_start,
 			VIRTIO_HDR_LEN + ETH_HLEN + ipHdrLen);
-		return 0;
+		return -EINVAL;
 	}
 
 	if (ip->protocol != IPPROTO_TCP &&
 	    ip->protocol != IPPROTO_UDP) {
 		return *pCsum;
 	}
+
+	if (tcpLen > len) {
+		log_err("ERROR: TCP/UDP packet len (%u) exceeds "
+			"buffer len (%lu). Control sum is incorrect\n",
+			tcpLen, len);
+		return -EMSGSIZE;
+	}
+
 	csum += ((ip->saddr >> 16) & 0xFFFF) + ((ip->saddr) & 0xFFFF);
 	csum += ((ip->daddr >> 16) & 0xFFFF) + ((ip->daddr) & 0xFFFF);
 	csum += htons((uint16_t)(ip->protocol));
 	csum += htons(tcpLen);
 	origcsum = *pCsum;
 	*pCsum = 0;
-	while (tcpLen > 1) {
-		csum += *tcpPacket++;
-		tcpLen -= sizeof(uint16_t);
-	}
 
-	/* if any bytes left, pad the bytes and add */
-	if(tcpLen > 0) {
-		csum += ((*tcpPacket) & htons(0xFF00));
+	/*
+	 * TCP/UDP checksum calculation. We assume that the buffer start
+	 * is aligned by 16-bit which is fair since the VNET, Ethernet, IP
+	 * and UDP/TCP headers are all aligned.
+	 *
+	 * We also assume that each next buffer begins with 16-bit aligned
+	 * address.
+	 */
+	bufIdx = tcpBufIdx;
+	bufLen = bufList[bufIdx].len - tcp_offset;
+
+	while (tcpLen > 0) {
+		uint16_t l_bufLen;
+
+		if (tcpLen < bufLen) {
+			bufLen = tcpLen;
+		}
+		l_bufLen = bufLen;
+
+		/* sum all 16-bit values */
+		while (l_bufLen > 1) {
+			csum += *tcpPacket++;
+			l_bufLen -= sizeof(uint16_t);
+		}
+
+		/* if any bytes left, pad the bytes and add */
+		if(l_bufLen > 0) {
+			csum += ((*tcpPacket) & htons(0xFF00));
+		}
+
+		/* proceed to the next buffer */
+		tcpLen -= bufLen;
+		if (tcpLen > 0) {
+			bufIdx++;
+			if (bufIdx >= n) {
+				log_err("ERROR: TCP/UDP packet exceeds "
+					"number fo buffers %d\n", n);
+				return -EINVAL;
+			}
+			tcpPacket = (uint16_t*)bufList[bufIdx].buf;
+			bufLen = bufList[bufIdx].len;
+		}
 	}
 
 	/* Fold 32-bit sum to 16 bits: add carrier to result */
@@ -1214,10 +1384,10 @@ static uint16_t virtioHostCalcTcpUdpCsum(void* buf, size_t len)
 	*pCsum = csum;
 	VIRTIO_NET_DEV_DBG(VIRTIO_NET_DEV_DBG_CSUM,
 			   "csum start: %d offset: %d, "
-			   "csum: 0x%04x / 0x%04x\n",
+			   "csum: 0x%04x / 0x%04x, length: %u / %lu\n",
 			   vnethdr->csum_start, vnethdr->csum_offset,
 			   ntohs(origcsum),
-			   ntohs(csum));
+			   ntohs(csum), ntohs(ip->tot_len) - ipHdrLen, len);
         return *pCsum;
 }
 
@@ -1304,7 +1474,8 @@ static void* virtioHostNetRxHandle(void *pNetHostCtx)
 				}
 				VIRTIO_NET_DEV_DBG(
 					VIRTIO_NET_DEV_DBG_INFO,
-					"readv: %d bytes\n", ret);
+					"readv: %d bytes (mtu: %d)\n",
+					ret, vNetHostCtx->cfg.mtu);
 #ifdef VIRTIO_NET_DEV_HDR_DUMP
 				for (i = 0; i < VIRTIO_HDR_LEN + 4; i++) {
 					printf("0x%02x ",
@@ -1312,8 +1483,31 @@ static void* virtioHostNetRxHandle(void *pNetHostCtx)
 				}
 				printf("\n");
 #endif
-				(void)virtioHostCalcTcpUdpCsum(bufList[0].buf,
-							       bufList[0].len);
+				/*
+				 * Workaround for the VxWorks VirtIO network
+				 * driver issue when the driver provides one
+				 * buffer of 1536 bytes. If the driver profides
+				 * buffer(s) shorter than the MTU, the TAP
+				 * driver returns a fragment of the packet. The
+				 * checksum calculating function
+				 * virtioHostCalcTcpUdpCsum() finds it, so the
+				 * back-end driver adjusts the MTU size. Now
+				 * configuration change does not propagate
+				 * since the driver already acts as if the MTU
+				 * is small.
+				 */
+				if (virtioHostCalcTcpUdpCsum(
+					    bufList, n, ret) == -EMSGSIZE &&
+				    ret < vNetHostCtx->cfg.mtu) {
+					vNetHostCtx->cfg.mtu =
+						ret - 36;
+					log_err("Update MTU to %d on %s\n",
+						vNetHostCtx->cfg.mtu,
+						vNetHostDev->beDevArgs.tapType);
+					virtioMtuUpdate(
+						vNetHostDev->beDevArgs.tapType,
+						vNetHostCtx->cfg.mtu);
+				}
 				/*
 				 * Fill the first buffer with the VirtIO
 				 * structure
