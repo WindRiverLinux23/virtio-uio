@@ -31,6 +31,7 @@
 #include <linux/virtio_config.h>
 #include <limits.h>
 #include <sys/queue.h>
+#include <mqueue.h>
 #include <endian.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -91,6 +92,13 @@ extern "C" {
 
 #define VIRTIO_MMIO_MAGIC_VALUE_LE 0x74726976 /* virt */
 
+#define VIRTIO_MMIO_INT_VRING               (1 << 0)
+#define VIRTIO_MMIO_INT_CONFIG              (1 << 1)
+#define VIRTIO_MMIO_INT_INIT                (1 << 31)
+
+/* default priority of the VSM requests for POSIX queue */
+#define VIRTIO_VSM_REQ_PRIO                 2
+
 struct virtioVsm;
 struct virtioHost;
 struct virioChannel;
@@ -100,6 +108,18 @@ typedef struct virtioVsm * VIRTIO_VSM_ID;
 typedef struct virtioVsmQueue * VIRTIO_VSM_QUEUE_ID;
 
 typedef void (* vHostDevCallbackFn)(struct virtioHost *, void *);
+
+/* virtio vsm io request */
+struct virtioVsmReq
+{
+	uint32_t channelId;
+	uint32_t type;
+	uint64_t address;
+	uint64_t size;
+	uint32_t value;
+	uint32_t pad;
+	uint8_t status;
+};
 
 struct virtioShmRegion
 {
@@ -199,6 +219,13 @@ struct virtioHostOps
 	void (*show)(struct virtioHost *, uint32_t);
 };
 
+struct virtioMQ
+{
+	mqd_t request_q;
+	mqd_t reply_q;
+	mqd_t irq_q;
+};
+
 struct virtioHost 
 {
 	VIRTIO_VSM_QUEUE_ID pVsmQueue;
@@ -207,6 +234,8 @@ struct virtioHost
 	struct virtioHostQueue *pQueue;
 	struct virtioMap *pMaps;
 	void *ctx;
+	struct virtioMQ mqs;
+	pthread_t req_host_thread;
 	uint32_t channelId;
 	uint32_t queueMax;
 	uint32_t shmMax;
@@ -289,6 +318,8 @@ extern void vsm_deinit(struct virtio_device *vdev);
 extern int virtioVsmGetUIO(VIRTIO_VSM_ID pDrvCtrl);
 extern int virtioVsmGetCtrl(VIRTIO_VSM_ID pDrvCtrl);
 extern bool virtioVsmLegacyIsLittleEndian(VIRTIO_VSM_ID pDrvCtrl);
+extern void virtioVsmHandleRequest(struct virtioHost *vHost,
+				   struct virtioVsmReq* req);
 
 static inline uint16_t __virtio16_to_cpu(bool little_endian, __virtio16 val)
 {

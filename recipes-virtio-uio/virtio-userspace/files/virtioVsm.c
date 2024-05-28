@@ -47,6 +47,7 @@ only MMIO device is supported.
 #include <string.h>
 #include <pthread.h>
 #include <semaphore.h>
+#include <mqueue.h>
 #include <stdatomic.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -55,6 +56,7 @@ only MMIO device is supported.
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <sys/queue.h>
+#include <sys/stat.h>
 #include "virtioHostLib.h"
 #include <syslog.h>
 
@@ -112,6 +114,7 @@ while ((false));
 #define VIRTIO_VSM_COMP_QUEUE           (pDrvCtrl->channelMax)
 #define VIRTIO_VSM_IRQ_QUEUE            (pDrvCtrl->channelMax + 1)
 #define VIRTIO_VSM_IRQ_INC(q, x)        (x) = (((x) + 1) % VIRTIO_VSM_QUEUE_NUM(q))
+#define VIRTIO_VSM_REQ_MAX              128
 
 /*
  * This flag is WR private ring flag, it was set by BE (Hypervisor) to
@@ -128,6 +131,7 @@ static void virtioVsmQueueDone(struct virtqueue *);
 static void* virtioVsmReqHandle(void *arg);
 static void* virtioVsmCompHandle(void *arg);
 static void* virtioVsmIrqHandle(void *arg);
+static void* virtioVsmNotifyHandle(void *arg);
 static int virtioVsmShmRegionGet(struct virtioVsm *, struct virtioVsmShmRegion *);
 static void virtioVsmShmRegionRelease(struct virtioVsm *, struct virtioVsmShmRegion *);
 
@@ -140,18 +144,6 @@ static struct virtioHostVsm virtioHostVsmDev = {
 		.shmRegionGet     = virtioVsmShmRegionGet,
 		.shmRegionRelease = virtioVsmShmRegionRelease,
 	}
-};
-
-/* virtio vsm io request */
-struct virtioVsmReq
-{
-	uint32_t channelId;
-	uint32_t type;
-	uint64_t address;
-	uint64_t size;
-	uint32_t value;
-	uint32_t pad;
-	uint8_t status;
 };
 
 /* virtio vsm irq request */
@@ -168,17 +160,22 @@ struct virtioVsmConfig
 	uint32_t channelId[1];
 };
 
+const char* virtioVsmReqQueueName = "/vsmreq%d";
+const char* virtioVsmRepQueueName = "/vsmrep%d";
+const char* virtioVsmIrqQueueName = "/vsmirq";
+
 /* virtio vsm virtual queue */
 struct virtioVsmQueue
 {
 	struct virtioVsm *pDrvCtrl;
-	struct virtioHost *vHost;
 	uint32_t channelId;
 	atomic_int int_pending;
 	pthread_mutex_t int_lock;
 	struct virtqueue *pReqQueue;
 	pthread_t req_thread;
 	sem_t req_sem;
+	mqd_t request_q;
+	mqd_t reply_q;
 	struct virtioVsmReq *req;
 };
 
@@ -190,6 +187,7 @@ struct virtioVsm
 
 	pthread_t comp_thread;
 	pthread_t irq_thread;
+	pthread_t notify_thread;
 	sem_t irq_sem;
 	sem_t comp_sem;
 
@@ -209,6 +207,9 @@ struct virtioVsm
 
 	/* irq queue array */
 	struct virtioVsmIrq *pIrq;
+
+	/* IRQ message queue handler */
+	mqd_t irq_q;
 
 	/* virtio host channel */
 	struct virtioVsmQueue pVsmQueue[0];
@@ -268,17 +269,12 @@ again:
 			for (q = 0, found = false; q < pDrvCtrl->reqQueueNum; q++) {
 				pVsmQueue = pDrvCtrl->pVsmQueue + q;
 
-				if (!pVsmQueue->vHost)
-					continue;
-				else {
-					if (pReq->channelId == pVsmQueue->vHost->channelId) {
-						found = true;
-						goto checkend;
-					}
+				if (pReq->channelId == pVsmQueue->channelId) {
+					found = true;
+					break;
 				}
 			}
 
-checkend:
 			if (!found) {
 				log_err("failed to find the queue\n");
 				continue;
@@ -317,6 +313,7 @@ checkend:
 	}
 }
 
+
 static void* virtioVsmIrqHandle(void *arg)
 {
 	struct virtioVsm *pDrvCtrl = arg;
@@ -339,7 +336,7 @@ static void* virtioVsmIrqHandle(void *arg)
 again:
 		/* drain the irq used ring */
 		while (1) {
-			VIRTIO_VSM_DBG_MSG(VIRTIO_VSM_DBG_INFO,
+			VIRTIO_VSM_DBG_MSG(VIRTIO_VSM_DBG_IRQREQ,
 					   "start\n");
 			pIrq = virtqueueGetBuffer(pIrqQueue, &len, &token);
 			if (!pIrq) {
@@ -361,12 +358,109 @@ again:
 			}
 
 			pthread_cond_signal(&pDrvCtrl->irq_bufs_cond);
-			VIRTIO_VSM_DBG_MSG(VIRTIO_VSM_DBG_INFO,
+			VIRTIO_VSM_DBG_MSG(VIRTIO_VSM_DBG_IRQREQ,
 					"recycle one irq request\n");
 		}
 
 		pthread_mutex_unlock(&pDrvCtrl->irq_lock);
-		VIRTIO_VSM_DBG_MSG(VIRTIO_VSM_DBG_INFO, "done\n");
+		VIRTIO_VSM_DBG_MSG(VIRTIO_VSM_DBG_IRQREQ, "done\n");
+	}
+}
+
+
+static void* virtioVsmNotifyHandle(void *arg)
+{
+	struct virtioVsm *pDrvCtrl = arg;
+	struct virtqueueBuf bufList[1];
+	struct virtqueue *pIrqQueue;
+	struct virtioVsmIrq *pIrq;
+	ssize_t irqLen = sizeof(struct virtioVsmIrq);
+	uint32_t len;
+	uint32_t token;
+	int rc;
+	unsigned int prio;
+	uint32_t num;
+
+	while (1) {
+		VIRTIO_VSM_DBG_MSG(VIRTIO_VSM_DBG_IRQREQ,
+				   "start\n");
+
+		pIrq = &pDrvCtrl->pIrq[pDrvCtrl->irqProd];
+		pthread_mutex_lock(&pDrvCtrl->irq_lock);
+		pIrqQueue = pDrvCtrl->pQueue[VIRTIO_VSM_IRQ_QUEUE];
+		while (pIrqQueue->num_free == 0) {
+			log_err("no irq resource available\n");
+			pthread_cond_wait(&pDrvCtrl->irq_bufs_cond,
+					  &pDrvCtrl->irq_lock);
+		}
+		pthread_mutex_unlock(&pDrvCtrl->irq_lock);
+
+		/* take along the status */
+		rc = mq_receive(pDrvCtrl->irq_q, (char*)pIrq,
+				irqLen, &prio);
+		if (rc < 0) {
+			log_err("failed to read irq queue: %s\n",
+				strerror(errno));
+			continue;
+		}
+		if (rc < irqLen) {
+			log_err("irq queue: communication error: %d < %ld\n",
+				rc, irqLen);
+			continue;
+		}
+
+		VIRTIO_VSM_DBG_MSG(VIRTIO_VSM_DBG_IRQREQ,
+				   "channelId:%u value:0x%x\n",
+				   pIrq->channelId, pIrq->value);
+
+		/* VSM VirtIO queue enable request */
+		if ((pIrq->value & VIRTIO_MMIO_INT_INIT) != 0) {
+			uint32_t queueId;
+			struct virtioVsmQueue *pVsmQueue =
+				virtioVsmGetQueue(pDrvCtrl, pIrq->channelId);
+
+			if (pVsmQueue == NULL) {
+				log_err("Unable to get VSM queue for "
+					"channel %d\n", pIrq->channelId);
+				continue;
+			}
+
+			queueId = (uint32_t)(pVsmQueue - pDrvCtrl->pVsmQueue);
+			atomic_init(&pVsmQueue->int_pending, false);
+			virtioVsmVirtqueueEnable(
+				(pDrvCtrl->pQueue[queueId])->vdev,
+				queueId, true);
+			VIRTIO_VSM_DBG_MSG(VIRTIO_VSM_DBG_IRQREQ,
+					   "Enable queue:%u\n",
+					   queueId);
+
+			if (pIrq->value == VIRTIO_MMIO_INT_INIT) {
+				continue;
+			}
+		}
+
+		bufList[0].buf = (void *)pIrq;
+		bufList[0].len = irqLen;
+
+		num = virtqueue_get_vring_size(pIrqQueue);
+		pDrvCtrl->irqProd = (pDrvCtrl->irqProd + 1) % num;
+
+		pthread_mutex_lock(&pDrvCtrl->irq_lock);
+		rc = virtqueueAddBuffer(pIrqQueue,
+					bufList,
+					1, 0,
+					(void *)pIrq);
+
+		if (rc) {
+			log_err("virtqueueAddBuffer failed %d\n", rc);
+			pthread_mutex_unlock(&pDrvCtrl->irq_lock);
+			continue;
+		}
+
+		virtqueueKick(pIrqQueue);
+		pthread_mutex_unlock(&pDrvCtrl->irq_lock);
+
+		VIRTIO_VSM_DBG_MSG(VIRTIO_VSM_DBG_IRQREQ, "done\n");
 	}
 }
 
@@ -453,15 +547,69 @@ static void virtioVsmQueueDone(struct virtqueue *pQueue)
 	VIRTIO_VSM_DBG_MSG(VIRTIO_VSM_DBG_INFO, "done\n");
 }
 
+void virtioVsmHandleRequest(struct virtioHost *vHost,
+			    struct virtioVsmReq* req)
+{
+	uint32_t value;
+
+	/* Endianess has been handled by virtiolib */
+	if (req->type == VIRTIO_VSM_T_IN) {
+		VIRTIO_VSM_DBG_MSG(VIRTIO_VSM_DBG_INFO,
+				   "read request\n");
+
+		if (virtioHostVsmReqRead(vHost, req->address,
+					 req->size, &value) == 0) {
+			req->value = value;
+			req->status = VIRTIO_VSM_S_OK;
+		} else
+			req->status = VIRTIO_VSM_S_IOERR;
+	} else if (req->type == VIRTIO_VSM_T_OUT) {
+		VIRTIO_VSM_DBG_MSG(VIRTIO_VSM_DBG_INFO,
+				   "write request\n");
+
+		if (virtioHostVsmReqWrite(
+			    vHost, req->address, req->size,
+			    req->value) == 0) {
+			req->status = VIRTIO_VSM_S_OK;
+		} else {
+			req->status = VIRTIO_VSM_S_IOERR;
+		}
+	} else if (req->type == VIRTIO_VSM_T_NOTIFY) {
+		VIRTIO_VSM_DBG_MSG(VIRTIO_VSM_DBG_INFO,
+				   "notify request\n");
+
+		if (virtioHostVsmReqKick(vHost, req->value) == 0)
+			req->status = VIRTIO_VSM_S_OK;
+		else
+			req->status = VIRTIO_VSM_S_IOERR;
+	} else if (req->type == VIRTIO_VSM_T_VERSION) {
+		VIRTIO_VSM_DBG_MSG(VIRTIO_VSM_DBG_INFO,
+				   "version request\n");
+		req->value = 2;
+		req->status = VIRTIO_VSM_S_OK;
+	} else if (req->type == VIRTIO_VSM_T_RESET) {
+		VIRTIO_VSM_DBG_MSG(VIRTIO_VSM_DBG_INFO,
+				   "reset request\n");
+
+		if (virtioHostVsmReqReset(vHost) == 0)
+			req->status = VIRTIO_VSM_S_OK;
+		else
+			req->status = VIRTIO_VSM_S_IOERR;
+	} else {
+		log_err("not supported request\n");
+		req->status = VIRTIO_VSM_S_UNSUPP;
+	}
+}
+
 static void* virtioVsmReqHandle(void *arg)
 {
 	struct virtioVsm *pDrvCtrl;
 	struct virtioVsmQueue *pVsmQueue = arg;
 	struct virtqueueBuf bufList[1];
-	struct virtioHost *vHost;
 	struct virtqueue *pReqQueue;
 	struct virtqueue *pCompQueue;
 	struct virtioVsmReq *pReq;
+	ssize_t reqLen = sizeof(struct virtioVsmReq);
 	uint32_t value;
 	uint32_t len;
 	uint32_t token;
@@ -469,6 +617,8 @@ static void* virtioVsmReqHandle(void *arg)
 	const volatile struct vring *vr;
 	int rc;
 	uint16_t flags = 0;
+
+	unsigned int prio;
 
 	while(1) {
 		rc = sem_wait(&pVsmQueue->req_sem);
@@ -480,21 +630,12 @@ static void* virtioVsmReqHandle(void *arg)
 		VIRTIO_VSM_DBG_MSG(VIRTIO_VSM_DBG_INFO,
 				"pVsmQueue->pReqQueue:0x%lx\n",
 				(unsigned long)pVsmQueue->pReqQueue);
-		VIRTIO_VSM_DBG_MSG(VIRTIO_VSM_DBG_INFO,
-				"pVsmQueue->vHost:0x%lx\n",
-				(unsigned long)pVsmQueue->vHost);
-
-		if (!pVsmQueue->vHost) {
-			log_err("null pVsmQueue->vHost\n");
-			return NULL;
-		}
 
 		if (!pVsmQueue->pReqQueue) {
 			log_err("null pVsmQueue->pReqQueue\n");
 			return NULL;
 		}
 
-		vHost = pVsmQueue->vHost;
 		pReqQueue = pVsmQueue->pReqQueue;
 		pDrvCtrl = pVsmQueue->pDrvCtrl;
 again:
@@ -524,57 +665,27 @@ again:
 				break;
 			}
 
-			/* Endianess has been handled by virtiolib */
-			if (pReq->type == VIRTIO_VSM_T_IN) {
-				VIRTIO_VSM_DBG_MSG(VIRTIO_VSM_DBG_INFO,
-						   "read request\n");
-
-				if (virtioHostVsmReqRead(vHost, pReq->address,
-							 pReq->size, &value) == 0) {
-					pReq->value = value;
-					pReq->status = VIRTIO_VSM_S_OK;
-				} else
-					pReq->status = VIRTIO_VSM_S_IOERR;
-			} else if (pReq->type == VIRTIO_VSM_T_OUT) {
-				VIRTIO_VSM_DBG_MSG(VIRTIO_VSM_DBG_INFO,
-						"write request\n");
-
-				if (virtioHostVsmReqWrite(
-					    vHost, pReq->address, pReq->size,
-					    pReq->value) == 0) {
-					pReq->status = VIRTIO_VSM_S_OK;
-				} else {
-					pReq->status = VIRTIO_VSM_S_IOERR;
-				}
-			} else if (pReq->type == VIRTIO_VSM_T_NOTIFY) {
-				VIRTIO_VSM_DBG_MSG(VIRTIO_VSM_DBG_INFO,
-						"notify request\n");
-
-				if (virtioHostVsmReqKick(vHost, pReq->value) == 0)
-					pReq->status = VIRTIO_VSM_S_OK;
-				else
-					pReq->status = VIRTIO_VSM_S_IOERR;
-			} else if (pReq->type == VIRTIO_VSM_T_VERSION) {
-				VIRTIO_VSM_DBG_MSG(VIRTIO_VSM_DBG_INFO,
-						"version request\n");
-
-				pReq->value = 2;
-				pReq->status = VIRTIO_VSM_S_OK;
-			} else if (pReq->type == VIRTIO_VSM_T_RESET) {
-				VIRTIO_VSM_DBG_MSG(VIRTIO_VSM_DBG_INFO,
-						"reset request\n");
-
-				if (virtioHostVsmReqReset(vHost) == 0)
-					pReq->status = VIRTIO_VSM_S_OK;
-				else
-					pReq->status = VIRTIO_VSM_S_IOERR;
-			} else {
-				log_err("not supported request\n");
-				pReq->status = VIRTIO_VSM_S_UNSUPP;
+			prio = VIRTIO_VSM_REQ_PRIO;
+			rc = mq_send(pVsmQueue->request_q, (char*)pReq,
+				     sizeof(struct virtioVsmReq), prio);
+			if (rc < 0) {
+				log_err("failed to send to queue %d: %s\n",
+					pVsmQueue->channelId, strerror(errno));
+			}
+			rc = mq_receive(pVsmQueue->reply_q, (char*)pReq,
+					reqLen, &prio);
+			if (rc < 0) {
+				log_err("failed to read queue %d %s\n",
+					pVsmQueue->channelId, strerror(errno));
+			}
+			if (rc < reqLen) {
+				log_err("queue %d: communication error: "
+					"%d < %ld\n", pVsmQueue->channelId,
+					rc, reqLen);
 			}
 
 			bufList[0].buf = pReq;
-			bufList[0].len = sizeof(struct virtioVsmReq);
+			bufList[0].len = reqLen;
 
 			if (pReq->type != VIRTIO_VSM_T_NOTIFY) {
 				VIRTIO_VSM_DBG_MSG(VIRTIO_VSM_DBG_INFO,
@@ -640,10 +751,12 @@ again:
 	}
 }
 
-static int virtioVsmQueueInit(struct virtioVsmQueue *pVsmQueue, struct virtioHost *vHost)
+static int virtioVsmQueueInit(struct virtioVsmQueue *pVsmQueue,
+			      struct virtioHost *vHost)
 {
 	struct virtioVsm *pDrvCtrl;
 	uint32_t queueId;
+	int ret;
 
 	VIRTIO_VSM_DBG_MSG(VIRTIO_VSM_DBG_INFO,
 			"start\n");
@@ -675,12 +788,16 @@ static int virtioVsmQueueInit(struct virtioVsmQueue *pVsmQueue, struct virtioHos
 	VIRTIO_VSM_DBG_MSG(VIRTIO_VSM_DBG_INFO,
 			"queueId:%u\n", queueId);
 
-	pVsmQueue->vHost = vHost;
+	vHost->mqs.request_q = pVsmQueue->request_q;
+	vHost->mqs.reply_q = pVsmQueue->reply_q;
+	vHost->mqs.irq_q = pDrvCtrl->irq_q;
 
-	atomic_init(&pVsmQueue->int_pending, false);
-
-	virtioVsmVirtqueueEnable((pDrvCtrl->pQueue[queueId])->vdev,
-				 queueId, true);
+	ret = virtioVsmNotify(pVsmQueue, vHost, VIRTIO_MMIO_INT_INIT);
+	if (ret < 0) {
+		log_err("VSM Queue enable failed for channel %d\n",
+			vHost->channelId);
+		return -EBADMSG;
+	}
 
 	VIRTIO_VSM_DBG_MSG(VIRTIO_VSM_DBG_INFO, "done\n");
 
@@ -717,61 +834,30 @@ static struct virtioVsmQueue *virtioVsmGetQueue(struct virtioVsm *pVsm, uint32_t
 static int virtioVsmNotify(struct virtioVsmQueue *pVsmQueue,
 			   struct virtioHost *vHost, uint32_t status)
 {
-	struct virtioVsm *pDrvCtrl;
-	struct virtqueueBuf bufList[1];
-	struct virtqueue *pIrqQueue;
-	struct virtioVsmIrq *irq;
-	uint32_t num;
+	struct virtioVsmIrq irq;
+	unsigned int prio;
 	int rc;
 
-	VIRTIO_VSM_DBG_MSG(VIRTIO_VSM_DBG_INFO, "start\n");
-
-	if (!pVsmQueue || !pVsmQueue->pDrvCtrl || !vHost)
-		return -EINVAL;
-
-	pDrvCtrl = pVsmQueue->pDrvCtrl;
-
-	pthread_mutex_lock(&pDrvCtrl->irq_lock);
-
-	pIrqQueue = pDrvCtrl->pQueue[VIRTIO_VSM_IRQ_QUEUE];
-
-	while (pIrqQueue->num_free == 0) {
-		log_err("no irq resource available\n");
-		pthread_cond_wait(&pDrvCtrl->irq_bufs_cond,
-				  &pDrvCtrl->irq_lock);
-	}
-
-	irq = &pDrvCtrl->pIrq[pDrvCtrl->irqProd];
+	VIRTIO_VSM_DBG_MSG(VIRTIO_VSM_DBG_IRQREQ, "start\n");
 
 	/* take along the status */
-	irq->channelId = vHost->channelId;
-	irq->value = status;
+	irq.channelId = vHost->channelId;
+	irq.value = status;
 
-	VIRTIO_VSM_DBG_MSG(VIRTIO_VSM_DBG_INFO,
+	VIRTIO_VSM_DBG_MSG(VIRTIO_VSM_DBG_IRQREQ,
 			"channelId:%u value:0x%x\n",
-			irq->channelId, irq->value);
+			irq.channelId, irq.value);
 
-	bufList[0].buf = (void *)irq;
-	bufList[0].len = sizeof(struct virtioVsmIrq);
-
-	num = virtqueue_get_vring_size(pIrqQueue);
-	pDrvCtrl->irqProd = (pDrvCtrl->irqProd + 1) % num;
-
-	rc = virtqueueAddBuffer(pIrqQueue,
-				bufList,
-				1, 0,
-				(void *)irq);
-	if (rc) {
-		log_err("virtqueueAddBuffer failed %d\n", rc);
-		pthread_mutex_unlock(&pDrvCtrl->irq_lock);
+	prio = VIRTIO_VSM_REQ_PRIO;
+	rc = mq_send(vHost->mqs.irq_q, (char*)&irq,
+		     sizeof(irq), prio);
+	if (rc < 0) {
+		log_err("failed to send to irq queue: %s\n",
+			strerror(errno));
 		return rc;
 	}
 
-	virtqueueKick(pIrqQueue);
-
-	pthread_mutex_unlock(&pDrvCtrl->irq_lock);
-
-	VIRTIO_VSM_DBG_MSG(VIRTIO_VSM_DBG_INFO, "done\n");
+	VIRTIO_VSM_DBG_MSG(VIRTIO_VSM_DBG_IRQREQ, "done\n");
 
 	return 0;
 }
@@ -1027,6 +1113,109 @@ static int virtioGetChannelMax(struct virtio_device *vdev,
         return 0;
 }
 
+static void vsmMqDestroy(struct virtioVsmQueue* pVsmQueue, uint32_t queueId)
+{
+	char vsmQName[NAME_MAX];
+
+	if (!pVsmQueue) {
+		return;
+	}
+	if (pVsmQueue->request_q != (mqd_t)-1) {
+		mq_close(pVsmQueue->request_q);
+		snprintf(vsmQName, sizeof(vsmQName),
+			 virtioVsmReqQueueName,
+			 queueId);
+		mq_unlink(vsmQName);
+	}
+	if (pVsmQueue->reply_q != (mqd_t)-1) {
+		mq_close(pVsmQueue->reply_q);
+		snprintf(vsmQName, sizeof(vsmQName),
+			 virtioVsmRepQueueName,
+			 queueId);
+		mq_unlink(vsmQName);
+	}
+}
+
+static int vsmMqCreate(struct virtioVsmQueue* pVsmQueue, uint32_t queueId)
+{
+	char vsmQName[NAME_MAX];
+
+	struct mq_attr qattr = {
+		.mq_maxmsg = VIRTIO_VSM_REQ_MAX,
+		.mq_msgsize = sizeof(struct virtioVsmReq)
+	};
+
+	if (!pVsmQueue) {
+		errno = EINVAL;
+		return -1;
+	}
+	snprintf(vsmQName, sizeof(vsmQName), virtioVsmReqQueueName,
+		 queueId);
+	pVsmQueue->request_q = mq_open(vsmQName, O_RDWR | O_CREAT,
+				   S_IRUSR | S_IWUSR, &qattr);
+	if (pVsmQueue->request_q == (mqd_t)-1) {
+		return -1;
+	}
+	snprintf(vsmQName, sizeof(vsmQName), virtioVsmRepQueueName,
+		 queueId);
+	pVsmQueue->reply_q = mq_open(vsmQName, O_RDWR | O_CREAT,
+				   S_IRUSR | S_IWUSR, &qattr);
+	if (pVsmQueue->reply_q == (mqd_t)-1) {
+		return -1;
+	}
+	return 0;
+}
+
+static int vsmIrqMqCreate(struct virtioVsm* pDrvCtrl, long maxmsg)
+{
+	struct mq_attr qattr = {
+		.mq_maxmsg = maxmsg,
+		.mq_msgsize = sizeof(struct virtioVsmIrq)
+	};
+
+	if (!pDrvCtrl) {
+		errno = EINVAL;
+		return -1;
+	}
+	pDrvCtrl->irq_q = mq_open(virtioVsmIrqQueueName, O_RDWR | O_CREAT,
+				   S_IRUSR | S_IWUSR, &qattr);
+	if (pDrvCtrl->irq_q == (mqd_t)-1) {
+		return -1;
+	}
+	return 0;
+}
+
+static void vsmIrqMqDestroy(struct virtioVsm* pDrvCtrl)
+{
+	if (!pDrvCtrl || pDrvCtrl->irq_q == (mqd_t)-1) {
+		return;
+	}
+	mq_close(pDrvCtrl->irq_q);
+	mq_unlink(virtioVsmIrqQueueName);
+}
+
+static void vsmThreadDestroy(pthread_t vsm_thread, const char* thread_name)
+{
+	int  ret;
+
+	if (vsm_thread) {
+		VIRTIO_VSM_DBG_MSG(VIRTIO_VSM_DBG_INFO,
+				   "%s thread cancel ->",
+				   thread_name);
+		ret = pthread_cancel(vsm_thread);
+		if (ret == 0) {
+			pthread_join(vsm_thread, NULL);
+			VIRTIO_VSM_DBG_MSG(VIRTIO_VSM_DBG_INFO,
+					   "done\n");
+		} else {
+			VIRTIO_VSM_DBG_MSG(VIRTIO_VSM_DBG_INFO,
+					   "error: %s\n",
+					   strerror(errno));
+		}
+	}
+}
+
+
 int vsm_init(struct virtio_device *vdev)
 {
 	uint32_t channelMax;
@@ -1103,23 +1292,6 @@ int vsm_init(struct virtio_device *vdev)
 	if (rc) {
 		log_err("Failed to create VSM complete "
 			"queue thread (%s)\n",
-			strerror(errno));
-		goto failed;
-	}
-
-	rc = sem_init(&pDrvCtrl->irq_sem, 0, 0);
-	if (rc) {
-		log_err("Failed to create VSM irq "
-			"queue sem (%s)\n",
-			strerror(errno));
-		goto failed;
-	}
-
-	rc = pthread_create(&pDrvCtrl->irq_thread, NULL,
-			    virtioVsmIrqHandle, pDrvCtrl);
-	if (rc) {
-		log_err("Failed to create VSM irq queue "
-			"thread (%s)\n",
 			strerror(errno));
 		goto failed;
 	}
@@ -1218,6 +1390,14 @@ int vsm_init(struct virtio_device *vdev)
 				"%d sem(%d)\n", queueId, rc);
 			goto failed;
 		}
+
+		rc = vsmMqCreate(pVsmQueue, queueId);
+		if (rc < 0) {
+                        log_err("Failed to create VSM request queue "
+				"%d %s\n", queueId, strerror(errno));
+			goto failed;
+		}
+
 		/*
 		 * We can't use priv, it'll be overwritten by linux virtiolib.
 		 * When specific pVsmQueue is needed, we need to iterate
@@ -1232,11 +1412,12 @@ int vsm_init(struct virtio_device *vdev)
 				"%d thread(%d)\n", queueId, rc);
 			goto failed;
 		}
-
 	}
 
-	pthread_mutex_init(&pDrvCtrl->pVsmQueue[VIRTIO_VSM_COMP_QUEUE].int_lock, NULL);
-	pthread_mutex_init(&pDrvCtrl->pVsmQueue[VIRTIO_VSM_IRQ_QUEUE].int_lock, NULL);
+	pthread_mutex_init(&pDrvCtrl->pVsmQueue[VIRTIO_VSM_COMP_QUEUE].int_lock,
+			   NULL);
+	pthread_mutex_init(&pDrvCtrl->pVsmQueue[VIRTIO_VSM_IRQ_QUEUE].int_lock,
+			   NULL);
 
 	pthread_mutex_init(&pDrvCtrl->irq_lock, NULL);
 	pthread_cond_init(&pDrvCtrl->irq_bufs_cond, NULL);
@@ -1249,6 +1430,40 @@ int vsm_init(struct virtio_device *vdev)
 	}
 
 	pDrvCtrl->irqProd = 0;
+
+	rc = vsmIrqMqCreate(pDrvCtrl, num * 10);
+	if (rc) {
+		log_err("Failed to create VSM irq queue "
+			"(%s)\n",
+			strerror(errno));
+		goto failed;
+	}
+
+	rc = sem_init(&pDrvCtrl->irq_sem, 0, 0);
+	if (rc) {
+		log_err("Failed to create VSM irq "
+			"queue sem (%s)\n",
+			strerror(errno));
+		goto failed;
+	}
+
+	rc = pthread_create(&pDrvCtrl->irq_thread, NULL,
+			    virtioVsmIrqHandle, pDrvCtrl);
+	if (rc) {
+		log_err("Failed to create VSM irq queue "
+			"thread (%s)\n",
+			strerror(errno));
+		goto failed;
+	}
+
+	rc = pthread_create(&pDrvCtrl->notify_thread, NULL,
+			    virtioVsmNotifyHandle, pDrvCtrl);
+	if (rc) {
+		log_err("Failed to create VSM irq notification "
+			"thread (%s)\n",
+			strerror(errno));
+		goto failed;
+	}
 
 	/* register VSM to virtio host library */
 	virtioHostVsmDev.vsmId = pDrvCtrl;
@@ -1299,6 +1514,7 @@ failed:
 			    pthread_cancel(pVsmQueue->req_thread) == 0) {
 				pthread_join(pVsmQueue->req_thread, NULL);
 			}
+			vsmMqDestroy(pVsmQueue, queueId);
 		}
 
 		if (pDrvCtrl->pIrq)
@@ -1307,15 +1523,11 @@ failed:
 		if (pDrvCtrl->pVirtqueueInfo)
 			free(pDrvCtrl->pVirtqueueInfo);
 
-		if (pDrvCtrl->comp_thread &&
-		    pthread_cancel(pDrvCtrl->comp_thread) == 0) {
-			pthread_join(pDrvCtrl->comp_thread, NULL);
-		}
+		vsmThreadDestroy(pDrvCtrl->comp_thread, "comp");
+		vsmThreadDestroy(pDrvCtrl->irq_thread, "irq");
+		vsmThreadDestroy(pDrvCtrl->notify_thread, "irq notify");
 
-		if (pDrvCtrl->irq_thread &&
-		    pthread_cancel(pDrvCtrl->irq_thread) == 0) {
-			pthread_join(pDrvCtrl->irq_thread, NULL);
-		}
+		vsmIrqMqDestroy(pDrvCtrl);
 
 		if (pDrvCtrl->pQueue)
 			free(pDrvCtrl->pQueue);
@@ -1390,6 +1602,7 @@ void vsm_deinit(struct virtio_device *vdev)
 					   "error: %s\n",
 					   strerror(errno));
 		}
+		vsmMqDestroy(&pDrvCtrl->pVsmQueue[queueId], queueId);
 	}
 
 	if (pDrvCtrl->pVirtqueueInfo)
@@ -1398,33 +1611,9 @@ void vsm_deinit(struct virtio_device *vdev)
 	if (pDrvCtrl->pIrq)
 		free(pDrvCtrl->pIrq);
 
-	if (pDrvCtrl->comp_thread) {
-		VIRTIO_VSM_DBG_MSG(VIRTIO_VSM_DBG_INFO,
-				   "comp thread cancel ->");
-		ret = pthread_cancel(pDrvCtrl->comp_thread);
-		if (ret == 0) {
-			pthread_join(pDrvCtrl->comp_thread, NULL);
-			VIRTIO_VSM_DBG_MSG(VIRTIO_VSM_DBG_INFO,
-					   "done\n");
-		} else {
-			log_err("error: %s\n", strerror(errno));
-		}
-	}
-
-	if (pDrvCtrl->irq_thread) {
-		VIRTIO_VSM_DBG_MSG(VIRTIO_VSM_DBG_INFO,
-				   "irq thread cancel ->");
-		ret = pthread_cancel(pDrvCtrl->irq_thread);
-		if (ret == 0) {
-			pthread_join(pDrvCtrl->irq_thread, NULL);
-			VIRTIO_VSM_DBG_MSG(VIRTIO_VSM_DBG_INFO,
-					   "done\n");
-		} else {
-			VIRTIO_VSM_DBG_MSG(VIRTIO_VSM_DBG_INFO,
-					   "error: %s\n",
-					   strerror(errno));
-		}
-	}
+	vsmThreadDestroy(pDrvCtrl->comp_thread, "comp");
+	vsmThreadDestroy(pDrvCtrl->irq_thread, "irq");
+	vsmThreadDestroy(pDrvCtrl->notify_thread, "irq notify");
 
 	free(pDrvCtrl);
 

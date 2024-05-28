@@ -43,6 +43,7 @@ logic, such as configuration handling or queue handling.
 #include <sys/mman.h>
 #include <sched.h>
 #include <pthread.h>
+#include <mqueue.h>
 #include <errno.h>
 #include <string.h>
 #include <stddef.h>
@@ -91,9 +92,6 @@ while ((false));
 
 #define VIRTIO_MMIO_MODERN_REG_VER          0x2
 
-#define VIRTIO_MMIO_INT_VRING               (1 << 0)
-#define VIRTIO_MMIO_INT_CONFIG              (1 << 1)
-
 #define DEFINE_SPINLOCK(mutex) pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER
 #define DEFINE_MUTEX(mutex) pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER
 
@@ -111,6 +109,7 @@ static int virtioHostNotify(struct virtioHost *);
 static int virtioHostQueueEnable(struct virtioHost *, uint32_t);
 static int virtioHostSetStatus(struct virtioHost *, uint32_t);
 static int virtioHostMapSetup(VIRTIO_VSM_ID, struct virtioMap *);
+static void* virtioVsmReqHostHandle(void *arg);
 
 /* locals */
 static TAILQ_HEAD(drvList, virtioHostDrvInfo) vHostCreateRtnList;
@@ -1148,6 +1147,15 @@ int virtioHostCreate
 		goto failed;
 	}
 
+	ret = pthread_create(&vHost->req_host_thread, NULL,
+			    virtioVsmReqHostHandle, vHost);
+	if (ret) {
+		log_err("Failed to create VSM request queue "
+			"channel %d host thread(%s)\n",
+			vHost->channelId, strerror(errno));
+		goto failed;
+	}
+
 	return ret;
 
 failed:
@@ -1172,6 +1180,8 @@ void virtioHostRelease(struct virtioHost *vHost)
 
 	if (!vHost)
 		return;
+
+	virtioHostStopThread(vHost->req_host_thread);
 
 	if (vHost->pQueue)
 		free(vHost->pQueue);
@@ -1399,12 +1409,6 @@ __virtio64 host_cpu_to_virtio64(struct virtioHost *vHost, uint64_t val)
 *          -1 if pushing a request to the VSM IRQ queue failed.
 *          -EINVAL when any of the following conditions are satisfied:
 *            - [vHost] is equal to [NULL].
-*            - [vHost->pVsmOps] is equal to [NULL].
-*            - [vHost->pVsmOps->notify] is equal to [NULL].
-*            - [vHost->pVsmQueue] is equal to [NULL].
-*            - [vHost->pVsmQueue->pDrvCtrl] is equal to [NULL].
-*            -EACCES when taking the semaphore
-*             [vHost->pVsmQueue->pDrvCtrl ->irqMtx] failed.
 *
 * ERRNO: N/A
 */
@@ -1555,18 +1559,13 @@ int virtioHostTranslate(struct virtioHost *vHost,
 *            - <pQueue->vHost> is equal to NULL.
 *            - <pQueue->vHost->pVsmOps> is equal to NULL.
 *            - <pQueue->vHost->pVsmOps->notify> is equal to NULL.
-*            - <pQueue->vHost->pVsmQueue> is equal to NULL.
-*            - <pQueue->vHost->pVsmQueue->pDrvCtrl> is equal to NULL.
-*          -EACCES when taking the semaphore
-*                  <pQueue->vHost->pVsmQueue->pDrvCtrl ->irqMtx> failed.
 *
 * ERRNO: N/A
 */
 
 static int virtioHostNotify(struct virtioHost *vHost)
 {
-	if (!vHost || !vHost->pVsmOps || !vHost->pVsmOps->notify ||
-			!vHost->pVsmQueue) {
+	if (!vHost || !vHost->pVsmOps || !vHost->pVsmOps->notify) {
 		log_err("invalid input parameter\n");
 		errno = EINVAL;
 		return -1;
@@ -2140,10 +2139,6 @@ int virtioHostQueueRelBuf(struct virtioHostQueue *pQueue, uint16_t descIdx,
  *            - <pQueue->vHost> is equal to NULL.
  *            - <pQueue->vHost->pVsmOps> is equal to NULL.
  *            - <pQueue->vHost->pVsmOps->notify> is equal to NULL.
- *            - <pQueue->vHost->pVsmQueue> is equal to NULL.
- *            - <pQueue->vHost->pVsmQueue->pDrvCtrl> is equal to NULL.
- *          -EACCES if taking the semaphore
- *                  <pQueue->vHost->pVsmQueue->pDrvCtrl->irqMtx> failed.
  *
  * ERRNO: N/A
  */
@@ -2382,4 +2377,46 @@ int virtioHostStopThread(pthread_t thread)
 		return -1;
 	}
 	return 0;
+}
+
+/*
+ * Handle VSM requests
+ *
+ * Function works in a separate thread
+ */
+static void* virtioVsmReqHostHandle(void *arg)
+{
+	struct virtioVsmReq req;
+	int rc;
+	unsigned int prio;
+	struct virtioHost *vHost = (struct virtioHost *)arg;
+	uint32_t value;
+
+	if (!vHost) {
+		log_err("vHost is NULL\n");
+		return NULL;;
+	}
+	while(1) {
+		rc = mq_receive(vHost->mqs.request_q, (char*)&req,
+				sizeof(req), &prio);
+		if (rc < 0) {
+			log_err("failed to read queue %d: %s\n",
+				vHost->channelId, strerror(errno));
+			continue;
+		}
+		if (rc < sizeof(req)) {
+			log_err("queue %d: communication error: %d < %ld\n",
+				vHost->channelId, rc, sizeof(req));
+			continue;
+		}
+		virtioVsmHandleRequest(vHost, &req);
+		prio = VIRTIO_VSM_REQ_PRIO;
+		rc = mq_send(vHost->mqs.reply_q, (char*)&req,
+			     sizeof(req), prio);
+		if (rc < 0) {
+			log_err("failed to send to queue %d: %s\n",
+				vHost->channelId, strerror(errno));
+		}
+	}
+	return NULL;
 }
