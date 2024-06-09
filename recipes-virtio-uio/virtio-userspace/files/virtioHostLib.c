@@ -35,12 +35,17 @@ logic, such as configuration handling or queue handling.
 
 */
 
+#define _GNU_SOURCE
+
 /* includes */
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
+#include <signal.h>
 #include <sys/queue.h>
 #include <sys/mman.h>
+#include <sys/types.h>
+#include <sys/wait.h>
 #include <sched.h>
 #include <pthread.h>
 #include <mqueue.h>
@@ -51,6 +56,7 @@ logic, such as configuration handling or queue handling.
 #include "virtioHostLib.h"
 #include "virtio_host_parser.h"
 #include <syslog.h>
+#include <semaphore.h>
 
 /* defines */
 #define VIRTIO_STATUS_RESET       0x00u //zhe not defined in linux?
@@ -82,11 +88,17 @@ while ((false));
 #define log_err(fmt, ...)					\
 	VIRTIO_HOST_DBG_MSG(VIRTIO_HOST_DBG_ERR, fmt,		\
 			   ##__VA_ARGS__)
+#define log_info(fmt, ...)					\
+	VIRTIO_HOST_DBG_MSG(VIRTIO_HOST_DBG_ERR, fmt,		\
+			   ##__VA_ARGS__)
 #else
 #undef VIRTIO_HOST_DBG_MSG
 #define VIRTIO_HOST_DBG_MSG(...)
 #define log_err(fmt, ...)					\
 	syslog(LOG_ERR, "%d: %s() " fmt, __LINE__, __func__,	\
+	       ##__VA_ARGS__)
+#define log_info(fmt, ...)					\
+	syslog(LOG_INFO, "%d: %s() " fmt, __LINE__, __func__,	\
 	       ##__VA_ARGS__)
 #endif  /* VIRTIO_HOST_DBG */
 
@@ -102,6 +114,14 @@ while ((false));
  */
 #define FAKE_KICK_DEBUG_CYCLE 10
 
+/* name of the semaphore for the BE device process initialization */
+#define VIRTIO_DEV_PROC_INIT_SEM_NAME "/virtio_init_sem"
+
+struct pidNode {
+	pid_t pid;
+	TAILQ_ENTRY(pidNode) node;
+};
+
 /* forward declarations */
 
 static int virtioHostReset(struct virtioHost *);
@@ -114,6 +134,7 @@ static void* virtioVsmReqHostHandle(void *arg);
 /* locals */
 static TAILQ_HEAD(drvList, virtioHostDrvInfo) vHostCreateRtnList;
 static TAILQ_HEAD(devList, virtioHost) vHostDeviceList;
+static TAILQ_HEAD(pidList, pidNode) vHostPidList;
 
 static DEFINE_SPINLOCK(vHostDeviceLock);
 static DEFINE_MUTEX(vHostDeviceMapLock);
@@ -410,6 +431,56 @@ int virtioHostDrvRegister(struct virtioHostDrvInfo *vHostdrvInfo)
 	return 0;
 }
 
+/*******************************************************************************
+ *
+ * Adjust core affinity for parent and child processes
+ *
+ * After the adjustment the child process runs on the last core while
+ * the parent remains on all the previous cores
+ */
+
+static int virtioHostParentAffinityAdjust(void)
+{
+	cpu_set_t cpuset;
+	int ncpus;
+	int ret = 0;
+
+	sched_getaffinity(0, sizeof(cpuset), &cpuset);
+        ncpus = CPU_COUNT(&cpuset);
+	if (ncpus > 1) {
+		CPU_CLR(ncpus - 1, &cpuset);
+		ret = sched_setaffinity(0, sizeof(cpuset), &cpuset);
+	}
+	if (ret == 0) {
+		sched_getaffinity(0, sizeof(cpuset), &cpuset);
+		ncpus = CPU_COUNT(&cpuset);
+		log_info("Running on %d cores\n", ncpus);
+	}
+	return ret;
+}
+
+static int virtioHostChildAffinityAdjust(void)
+{
+	int i;
+	cpu_set_t cpuset;
+	int ncpus;
+	int ret = 0;
+
+	sched_getaffinity(0, sizeof(cpuset), &cpuset);
+        ncpus = CPU_COUNT(&cpuset);
+	if (ncpus > 1) {
+		for (i = 0; i < ncpus - 1; i++) {
+			CPU_CLR(i, &cpuset);
+		}
+		ret = sched_setaffinity(0, sizeof(cpuset), &cpuset);
+	}
+	if (ret == 0) {
+		sched_getaffinity(0, sizeof(cpuset), &cpuset);
+		ncpus = CPU_COUNT(&cpuset);
+		log_info("Running on %d cores\n", ncpus);
+	}
+	return ret;
+}
 
 /*******************************************************************************
 *
@@ -418,22 +489,31 @@ int virtioHostDrvRegister(struct virtioHostDrvInfo *vHostdrvInfo)
 * This routine creates virtio host devices with the given virtual channel.
 * infomation.
 *
-* RETURNS: N/A
+* RETURNS: 0 in the original process, 1 if the new process has been
+* created for the device and -1 in error.
 *
 * ERRNO: N/A
 */
 
-static void virtioHostDevicesCreate(struct virtioHostDev *pHostDev,
+static int virtioHostDevicesCreate(struct virtioHostDev *pHostDev,
 				    uint32_t devNum)
 {
 	struct virtioHostDrvInfo *pHostDrvInfo;
 	bool match;
 	uint32_t i;
 	int ret;
+	sem_t* pHostDeviceInitSem = sem_open(VIRTIO_DEV_PROC_INIT_SEM_NAME,
+					     O_CREAT, S_IRUSR | S_IWUSR, 0);
+
+	if (pHostDeviceInitSem == SEM_FAILED) {
+		log_err("back-end device initialization semaphore error: %s\n",
+			strerror(errno));
+		return -1;
+	}
 
 	if (TAILQ_EMPTY(&vHostCreateRtnList)) {
 		log_err("no back-end driver registered!\n");
-		return;
+		return -1;
 	}
 
 	for (i = 0; i < devNum; i++) {
@@ -458,14 +538,88 @@ static void virtioHostDevicesCreate(struct virtioHostDev *pHostDev,
 			continue;
 		}
 
-		ret = pHostDrvInfo->create(&pHostDev[i]);
-		if (ret) {
-			log_err("failed to initialize %d\n",
-				ret);
-			continue;
+		/*
+		 * For a device that runs in a separate process we
+		 * create only that device in the new process while
+		 * the original process continue creating devices.
+		 */
+		if (pHostDrvInfo->flags == VIRTIO_HOST_FLAG_PROCESS) {
+			pid_t pid = fork();
+			if (pid == 0) {
+				ret = pagemap_reinit();
+				if (ret) {
+					log_err("pagemap reinitialization "
+						"failed %s\n",
+						strerror(errno));
+					goto initdone;
+				}
+				ret = virtioHostChildAffinityAdjust();
+				if (ret) {
+					log_err("Child CPU affinity set "
+						"fail %s\n",
+						strerror(errno));
+					goto initdone;
+				}
+				ret = pHostDrvInfo->create(&pHostDev[i]);
+				if (ret) {
+					log_err("failed to initialize %d\n",
+						ret);
+					goto initdone;
+				}
+			initdone:
+				ret = sem_post(pHostDeviceInitSem);
+				if (ret) {
+					log_err("failed release initialization "
+						"semaphore: %s\n",
+						strerror(errno));
+				}
+				sem_close(pHostDeviceInitSem);
+				if (ret == 0) {
+					return 1;
+				} else {
+					return -1;
+				}
+			} else if (pid < 0) {
+				log_err("Process for a new device failed! "
+					"Type: %d, channel %d\n",
+					pHostDev[i].typeId,
+					pHostDev[i].channelNum);
+			} else {
+				struct pidNode* pNode =
+					malloc(sizeof(struct pidNode));
+				if (pNode != NULL) {
+					pNode->pid = pid;
+					TAILQ_INSERT_TAIL(&vHostPidList,
+							  pNode, node);
+				}
+				ret = sem_wait(pHostDeviceInitSem);
+				if (ret) {
+					log_err("initialization semaphore "
+						"wait failed: %s\n",
+						strerror(errno));
+				}
+				ret = virtioHostParentAffinityAdjust();
+				if (ret) {
+					log_err("Parent CPU affinity set "
+						"fail %s\n",
+						strerror(errno));
+					continue;
+				}
+			}
+		} else {
+			ret = pHostDrvInfo->create(&pHostDev[i]);
+			if (ret) {
+				log_err("failed to initialize %d\n",
+					ret);
+				continue;
+			}
 		}
 	}
+	sem_close(pHostDeviceInitSem);
+	sem_unlink(VIRTIO_DEV_PROC_INIT_SEM_NAME);
+	return 0;
 }
+
 
 /*
  * Initialize static structures
@@ -475,6 +629,7 @@ void virtioHostInit(void)
 	VIRTIO_HOST_DBG_MSG(VIRTIO_HOST_DBG_INFO, "start\n");
 	TAILQ_INIT(&vHostCreateRtnList);
 	TAILQ_INIT(&vHostDeviceList);
+	TAILQ_INIT(&vHostPidList);
 	VIRTIO_HOST_DBG_MSG(VIRTIO_HOST_DBG_INFO, "done\n");
 }
 
@@ -486,12 +641,13 @@ void virtioHostInit(void)
 * share memory region and parses it, creates and initialize all the virtio host
 * devices on the VxWorks host VM.
 *
-* RETURNS: N/A
+* RETURNS: 0 in the same process, 1 if a separate process has been created
+* for the device and -1 on error.
 *
 * ERRNO: N/A
 */
 extern void virtioHostYamlConnect(void);
-void virtioHostDevicesInit(void)
+int virtioHostDevicesInit(void)
 {
 	struct virtioVsmShmRegion vShmRegion;
 	struct virtioHostDev *pHostDev = NULL;
@@ -508,7 +664,7 @@ void virtioHostDevicesInit(void)
 
 	if (!pgVirtioHostVsm) {
 		log_err("VSM driver not initialized!\n");
-		return;
+		return -1;
 	}
 
 	memset((void *)&virtioHostCfgInfo, 0, sizeof(VIRTIO_HOST_CFG_INFO));
@@ -518,7 +674,7 @@ void virtioHostDevicesInit(void)
 	if (virtioHostVsmShmRegionGet(pgVirtioHostVsm, &vShmRegion) != 0) {
 		log_err("unable to get the shared memory %s\n",
 			strerror(errno));
-		return;
+		return -1;
 	}
 
 	shmBuf = (const char *)vShmRegion.vaddr;
@@ -526,12 +682,12 @@ void virtioHostDevicesInit(void)
 	if (dataLen == 0) {
 		log_err("share memory is empty!\n");
 		virtioHostVsmShmRegionRelease(pgVirtioHostVsm, &vShmRegion);
-		return;
+		return -1;
 	}
 	yamlBuf = malloc(dataLen + 1);
 	if (yamlBuf == NULL) {
 		log_err("config buffer allocation error\n");
-		return;
+		return -1;
 	}
 	for (i = 0; i < dataLen; i++) {
 		yamlBuf[i] = shmBuf[i];
@@ -548,7 +704,7 @@ void virtioHostDevicesInit(void)
 		log_err("virtio host configuraton can't "
 			"be parsed!\n");
 		free(yamlBuf);
-		return;
+		return -1;
 	}
 	free(yamlBuf);
 
@@ -560,13 +716,57 @@ void virtioHostDevicesInit(void)
 	virtioHostVsmSetGuestMap(pgVirtioHostVsm, pMaps, mapNum);
 
 	/* create virtio host devices */
-	virtioHostDevicesCreate(pHostDev, devNum);
+	r = virtioHostDevicesCreate(pHostDev, devNum);
 
 	virtioHostVsmShmRegionRelease(pgVirtioHostVsm, &vShmRegion);
 
 	VIRTIO_HOST_DBG_MSG(VIRTIO_HOST_DBG_INFO, "done\n");
 
-	return;
+	return r;
+}
+
+
+/*******************************************************************************
+*
+* virtioHostDevicesDeinit - free host devices
+*
+* Kills the beack-ens device processes if they have been created
+*
+* Note: the function is called before the VSM process exit.
+* The function does not free the list or it's elements because it will disrupt
+* the TAILQ_FOREACH() execution. After the process ends, memory gets deallocated
+* anyways.
+*
+* RETURNS: 0 on success, -1 on error
+*/
+
+int virtioHostDevicesDeinit(void)
+{
+	int ret = 0;
+	struct pidNode* pPidNode;
+
+	if (TAILQ_EMPTY(&vHostPidList)) {
+		return 0;
+	}
+	TAILQ_FOREACH(pPidNode, &vHostPidList, node) {
+		pid_t pid = pPidNode->pid;
+
+		VIRTIO_HOST_DBG_MSG(VIRTIO_HOST_DBG_INFO,
+				    "Killing process %d\n", pid);
+		ret = kill(pid, SIGINT);
+		if (ret != 0) {
+			log_err("Error killing process %d: %s\n",
+				pid, strerror(errno));
+		} else {
+			int status;
+			ret = waitpid(pid, &status, 0);
+			if (ret < 0) {
+				log_err("Error child waiting %d: %s\n",
+					pid, strerror(errno));
+			}
+		}
+	}
+	return 0;
 }
 
 
@@ -2396,6 +2596,9 @@ static void* virtioVsmReqHostHandle(void *arg)
 		log_err("vHost is NULL\n");
 		return NULL;;
 	}
+	VIRTIO_HOST_DBG_MSG(VIRTIO_HOST_DBG_IRQREQ,
+			    "Starting thread for channel %d\n",
+			    vHost->channelId);
 	while(1) {
 		rc = mq_receive(vHost->mqs.request_q, (char*)&req,
 				sizeof(req), &prio);

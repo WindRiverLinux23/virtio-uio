@@ -239,6 +239,7 @@ struct virtioHostOps virtioBlkHostOps = {
 static struct virtioHostDrvInfo virtioBlkHostDrvInfo =
 {
 	.typeId = VIRTIO_TYPE_BLOCK,
+	.flags = VIRTIO_HOST_FLAG_THREAD,
 	.create = virtioHostBlkCreate,
 };
 

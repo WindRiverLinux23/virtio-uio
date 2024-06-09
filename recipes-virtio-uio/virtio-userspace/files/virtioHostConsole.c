@@ -223,6 +223,7 @@ struct virtioHostOps virtioConsoleHostOps = {
 static struct virtioHostDrvInfo HostDrvInfo =
 {
 	.typeId = VIRTIO_TYPE_CONSOLE,
+	.flags = VIRTIO_HOST_FLAG_THREAD,
 	.create = virtioHostConsoleCreate,
 };
 

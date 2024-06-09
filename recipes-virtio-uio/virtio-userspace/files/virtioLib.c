@@ -378,7 +378,7 @@ static int virtqueueInitIndirect(struct virtqueue* pQueue,
 
 	totalSize = idrNum * sizeof(struct vring_desc) * pQueue->vRing.num;
 
-	idrTbl = zmalloc(totalSize);
+	idrTbl = vq_shmalloc(totalSize);
 	if (idrTbl == NULL) {
 		VIRTIO_LIB_DBG_MSG(VIRTIO_LIB_DBG_INFO,
 				   "idrTbl allocation failed\n");
@@ -421,16 +421,19 @@ static void virtqueueDeinitIndirect(struct virtqueue* pQueue)
 {
 	struct vqDescExtra* pQueueDescx;
 	uint32_t idx;
+	size_t totalSize;
 
 	VIRTIO_LIB_DBG_MSG(VIRTIO_LIB_DBG_INFO, "start\n");
+	totalSize = pQueue->idrNum *
+		sizeof(struct vring_desc) * pQueue->vRing.num;
+	vq_shmfree(pQueue->vqDescx[0].idrTbl, totalSize);
+
 	for (idx = 0; idx < pQueue->vRing.num; idx++) {
 		pQueueDescx = &pQueue->vqDescx[idx];
 
 		if (pQueueDescx->idrTbl == NULL) {
 			break;
 		}
-
-		free(pQueueDescx->idrTbl);
 		pQueueDescx->idrTbl = NULL;
 		pQueueDescx->idrTblPhy = 0;
         }
@@ -515,10 +518,6 @@ int virtqueueRingInit(struct virtqueue* pQueue,
 	for (idx = 0; idx < (num - 1U); idx++) {
 		pQueue->vRing.desc[idx].next = (uint16_t) (idx + 1U);
         }
-
-	pthread_mutex_lock(&vDev->vqs_list_lock);
-	TAILQ_INSERT_TAIL(&vDev->queueList, pQueue, node);
-	pthread_mutex_unlock(&vDev->vqs_list_lock);
 
 	VIRTIO_LIB_DBG_MSG(VIRTIO_LIB_DBG_INFO, "done\n");
 	return 0;
@@ -631,6 +630,13 @@ static int pagemap_destroy(void)
 		close(pagemap_fd);
 		pagemap_fd = -1;
 	}
+	return 0;
+}
+
+int pagemap_reinit(void)
+{
+	pagemap_destroy();
+	return pagemap_init();
 }
 
 /*
@@ -866,6 +872,51 @@ void virtqueueNotification(struct virtqueue* pQueue)
 }
 
 /**
+ * Allocate memory using mmap
+ * Allows thememory be consistent across the processes after fork()
+ * @size: the size of the memory required
+ *
+ * @return allocated address in success or NULL on error
+ */
+VIRT_ADDR vq_shmalloc(size_t size)
+{
+	VIRT_ADDR addr = mmap(NULL, size, PROT_READ | PROT_WRITE,
+			      MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+	if (addr == MAP_FAILED) {
+		log_err("Virtqueue memory size %ld allocation failed %s\n",
+			size, strerror(errno));
+		return NULL;
+	}
+	/* We need to write something so the mapping gets created */
+	bzero((void*)addr, size);
+	return addr;
+}
+
+/**
+ * Deallocate memory using munmap
+ * @addr: memory address
+ * @size: the size of the memory required
+ *
+ * @return 0 on success and -1 on error
+ */
+int vq_shmfree(VIRT_ADDR addr, size_t size)
+{
+	int ret = 0;
+
+	if (addr == NULL) {
+		ret = 0;
+	} else {
+		ret = munmap((void *)addr, size);
+		if (ret < 0) {
+			log_err("Virtqueue memory %p (%ld) "
+				"de-allocation failed %s\n",
+				addr, size, strerror(errno));
+		}
+	}
+	return ret;
+}
+
+/**
  * Setup the virtqueue
  * @vdev: virtual device pointer
  * @index: virtqueue number
@@ -896,8 +947,7 @@ int setup_vq(struct virtio_device *vdev, unsigned int index,
 		return -1;
 	}
 
-	vdev->ringAddr[index] = (VIRT_ADDR)memalign(align,
-						    vring_size(num, align));
+	vdev->ringAddr[index] = vq_shmalloc(vring_size(num, align));
 	if (vdev->ringAddr[index] == (VIRT_ADDR)NULL) {
 		log_err("failed to allocate ring %x\n", index);
 		errno = ENOMEM;
@@ -1157,9 +1207,7 @@ static int virtioDevGetFeatures(struct virtio_device* vdev)
  */
 int virtioDevInit(struct virtio_device* vdev)
 {
-	TAILQ_INIT(&vdev->queueList);
 	pthread_mutex_init(&vdev->config_lock, NULL);
-	pthread_mutex_init(&vdev->vqs_list_lock, NULL);
 	virtioDevGetFeatures(vdev);
 	return pagemap_init();
 }
@@ -1171,6 +1219,8 @@ int virtioDevInit(struct virtio_device* vdev)
 void virtioDevFree(struct virtio_device* vdev)
 {
 	int i;
+	uint32_t num;
+	size_t align = getpagesize();
 
 	VIRTIO_LIB_DBG_MSG(VIRTIO_LIB_DBG_INFO, "start\n");
 	VIRTIO_LIB_DBG_MSG(VIRTIO_LIB_DBG_INFO, "vdev\n");
@@ -1178,7 +1228,9 @@ void virtioDevFree(struct virtio_device* vdev)
 
 	for (i = 0; i < vdev->nVqs; i++) {
 		if (vdev->ringAddr[i] != NULL) {
-			free(vdev->ringAddr[i]);
+			virtio_write(vdev, VIRTIO_MMIO_QUEUE_SEL, i);
+			num = virtio_read(vdev, VIRTIO_MMIO_QUEUE_NUM_MAX);
+			vq_shmfree(vdev->ringAddr[i], vring_size(num, align));
 		}
 		if (vdev->queues[i] != NULL) {
 			virtqueueDeinitIndirect(vdev->queues[i]);

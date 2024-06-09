@@ -95,13 +95,11 @@ struct virtio_device_id {
 
 /**
  * struct virtio_device - representation of a device using virtio
- * @queueList: internal list of virtqueues
  * @index: unique position on the virtio bus
  * @failed: saved value for VIRTIO_CONFIG_S_FAILED bit (for restore)
  * @config_enabled: configuration change reporting enabled
  * @config_change_pending: configuration change reported while disabled
  * @config_lock: protects configuration change reporting
- * @vqs_list_lock: protects @vqs.
  * @dev: underlying device.
  * @id: the device type identification (used to match it with a driver).
  * @features: the features supported by both driver and device.
@@ -113,13 +111,11 @@ struct virtio_device_id {
  * @priv: private pointer for the driver's use.
  */
 struct virtio_device {
-	TAILQ_HEAD(vqList, virtqueue) queueList;
 	int index;
 	bool failed;
 	bool config_enabled;
 	bool config_change_pending;
 	pthread_mutex_t config_lock;
-	pthread_mutex_t vqs_list_lock;
 	struct device dev;
 	struct virtio_device_id id;
 	uint64_t features;
@@ -325,6 +321,11 @@ extern void virtioConfigChange(const struct virtio_device* vdev);
 extern uint64_t virtioHasFeatures(const struct virtio_device* vdev,
 				  uint64_t feature);
 void virtioDevReset(struct virtio_device* vdev);
+
+VIRT_ADDR vq_shmalloc(size_t size);
+int vq_shmfree(VIRT_ADDR addr, size_t size);
+int pagemap_reinit(void);
+
 #ifdef __cplusplus
 }
 #endif

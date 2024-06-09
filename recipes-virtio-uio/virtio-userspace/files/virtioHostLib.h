@@ -99,6 +99,9 @@ extern "C" {
 /* default priority of the VSM requests for POSIX queue */
 #define VIRTIO_VSM_REQ_PRIO                 2
 
+#define VIRTIO_HOST_FLAG_THREAD   (1U << 0)
+#define VIRTIO_HOST_FLAG_PROCESS  (1U << 1)
+
 struct virtioVsm;
 struct virtioHost;
 struct virioChannel;
@@ -270,12 +273,14 @@ struct virtioHost
 struct virtioHostDrvInfo 
 {
 	uint32_t typeId;
+	uint32_t flags;
 	int (*create)(struct virtioHostDev *);
 	TAILQ_ENTRY(virtioHostDrvInfo) node;
 };
 
 /* APIs for VSM */
-extern void virtioHostDevicesInit(void);
+extern int virtioHostDevicesInit(void);
+extern int virtioHostDevicesDeinit(void);
 extern void virtioHostInit(void);
 extern int virtioHostVsmRegister(struct virtioHostVsm *);
 extern int virtioHostVsmReqRead(struct virtioHost *, uint64_t,

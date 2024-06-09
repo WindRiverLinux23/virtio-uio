@@ -57,6 +57,7 @@ struct virtioHostOps virtioHostVsockOps =
 static struct virtioHostDrvInfo virtioHostVsockDrvInfo =
 {
     .typeId = VIRTIO_TYPE_VSOCK,
+    .flags = VIRTIO_HOST_FLAG_THREAD,
     .create = virtioHostVsockCreate,
 };
 

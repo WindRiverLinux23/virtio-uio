@@ -127,7 +127,7 @@ static int virtioIntProcess(struct virtio_device* vdev, int uio_fd)
                         break;
                 } else {
                         if (uio.revents & POLLIN) {
-                                err = read(uio_fd, &nints, sizeof(nints));
+				err = read(uio_fd, &nints, sizeof(nints));
                                 if (err < 0) {
 					log_err("Read error %s\n",
                                                strerror(errno));
@@ -220,16 +220,30 @@ int main (void)
 	 */
 
 	virtioDevice.dev.base = addr;
-	if (vsm_init(&virtioDevice) != 0) {
+	err = vsm_init(&virtioDevice);
+	if (err < 0) {
 		log_err("VSM initialization FAILED\n");
 		return -1;
+	} else if (err == 0) {
+		/*
+		 * Parent process. Handles VSM.
+		 */
+		log_info("VirtIO VSM initialization complete\n");
+		uio_fd = open(virtioDevice.uio_device, O_RDWR | O_SYNC);
+		if (uio_fd < 0) {
+			log_err("UIO device open error %s\n", strerror(errno));
+		} else {
+			virtioIntProcess(&virtioDevice, uio_fd);
+		}
+		close(uio_fd);
+		vsm_deinit(&virtioDevice);
+	} else {
+		/* Process created for individual devices */
+		log_info("VirtIO BE driver initialization complete\n");
+		while (1) {
+			sleep(60);
+		}
 	}
-
-	log_info("VirtIO initialization complete\n");
-        uio_fd = open(virtioDevice.uio_device, O_RDWR | O_SYNC);
-	virtioIntProcess(&virtioDevice, uio_fd);
-	close(uio_fd);
-	vsm_deinit(&virtioDevice);
 	log_info("VirtIO userspace stopped\n");
 #ifndef DEBUG
 	closelog();

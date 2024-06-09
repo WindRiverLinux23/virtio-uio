@@ -212,6 +212,7 @@ struct virtioHostOps virtioGpioHostOps = {
 static struct virtioHostDrvInfo HostDrvInfo =
 {
 	.typeId = VIRTIO_TYPE_GPIO,
+	.flags = VIRTIO_HOST_FLAG_THREAD,
 	.create = virtioHostGpioCreate,
 };
 

@@ -211,6 +211,7 @@ struct virtioHostOps virtioNetHostOps = {
 static struct virtioHostDrvInfo virtioNetHostDrvInfo =
 {
 	.typeId = VIRTIO_TYPE_NET,
+	.flags = VIRTIO_HOST_FLAG_THREAD,
 	.create = virtioHostNetCreate,
 };
 
@@ -242,11 +243,22 @@ void virtioHostNetDrvInit(void)
 	pthread_mutex_init(&vNetHostDrv.dispMtx, NULL);
 	pthread_cond_init(&vNetHostDrv.dispCond, NULL);
 
-	ret = pthread_create(&vNetHostDrv.dispThread, NULL,
-			     virtioHostNetReqDispatch, NULL);
-	if (ret) {
-		log_err("failed to create virtio net host dispatch thread\n");
+
+	/*
+	 * The request dispatch thread has to be one for all the devices
+	 * For the testing purposes we run only one network device
+	 * For the future we need to modify individual BE drivers to
+	 * work as multiple processes
+	 */
+	if (virtioNetHostDrvInfo.flags == VIRTIO_HOST_FLAG_THREAD) {
+		ret = pthread_create(&vNetHostDrv.dispThread, NULL,
+				     virtioHostNetReqDispatch, NULL);
+		if (ret) {
+			log_err("failed to create virtio net host "
+				"dispatch thread\n");
+		}
 	}
+
 }
 
 void virtioHostNetDrvRelease(void)
@@ -657,6 +669,22 @@ static int virtioHostNetDevCreate(struct virtioNetHostDev *pNetHostDev)
 	vhost         = (struct virtioHost *)pNetHostDev;
 	pNetHostCtx   = (struct virtioNetHostCtx *)pNetHostDev;
 	pNetBeDevArgs = &pNetHostDev->beDevArgs;
+
+	/*
+	 * The request dispatch thread has to be one for all the devices
+	 * For the testing purposes we run only one network device
+	 * For the future we need to modify individual BE drivers to
+	 * work as multiple processes
+	 */
+	if (virtioNetHostDrvInfo.flags == VIRTIO_HOST_FLAG_PROCESS) {
+		ret = pthread_create(&vNetHostDrv.dispThread, NULL,
+				     virtioHostNetReqDispatch, NULL);
+		if (ret) {
+			log_err("failed to create virtio net host "
+				"dispatch thread\n");
+			goto err;
+		}
+	}
 
 	ret = virtioHostNetBeDevCreate(pNetHostDev);
 	if (ret)
