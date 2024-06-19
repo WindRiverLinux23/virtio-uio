@@ -325,6 +325,7 @@ extern int virtioVsmGetCtrl(VIRTIO_VSM_ID pDrvCtrl);
 extern bool virtioVsmLegacyIsLittleEndian(VIRTIO_VSM_ID pDrvCtrl);
 extern void virtioVsmHandleRequest(struct virtioHost *vHost,
 				   struct virtioVsmReq* req);
+extern bool virtioHostQueueReady(struct virtioHostQueue *pQueue);
 
 static inline uint16_t __virtio16_to_cpu(bool little_endian, __virtio16 val)
 {

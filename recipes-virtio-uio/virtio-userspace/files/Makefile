@@ -34,7 +34,9 @@ SRCS = \
     virtioHostConsole.c \
     virtioHostGpio.c \
     virtioHostVSock.c \
-    virtioHostVSock_unix.c
+    virtioHostVSock_unix.c \
+    virtioHostShowLib.c \
+    virtioShowLib.c
 
 LDFLAGS += -lyaml -lssl -lcrypto -lpthread -lgpiod
 

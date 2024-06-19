@@ -32,6 +32,9 @@ LIC_FILES_CHKSUM = " \
     file://virtioHostVSock.c;beginline=3;endline=23;md5=f6543e0490f594fcadd256b584fe21b0 \
     file://virtioHostVSock_unix.c;beginline=3;endline=23;md5=f6543e0490f594fcadd256b584fe21b0 \
     file://virtioHostVSock.h;beginline=3;endline=23;md5=f6543e0490f594fcadd256b584fe21b0 \
+    file://virtioHostShowLib.c;beginline=3;endline=23;md5=f6543e0490f594fcadd256b584fe21b0 \
+    file://virtioShowLib.h;beginline=3;endline=23;md5=f6543e0490f594fcadd256b584fe21b0 \
+    file://virtioShowLib.c;beginline=3;endline=23;md5=f6543e0490f594fcadd256b584fe21b0 \
     "
 
 # The inherit of module.bbclass will automatically name module packages with
@@ -63,6 +66,9 @@ SRC_URI = "file://Makefile \
            file://virtioHostGpio.c \
            file://mevent.c \
            file://mevent.h \
+           file://virtioHostShowLib.c \
+           file://virtioShowLib.c \
+           file://virtioShowLib.h \
            file://virtio-userspace.service \
            file://gpu/virtio_host_gpu.c \
            file://gpu/vdisplay_sdl.c \

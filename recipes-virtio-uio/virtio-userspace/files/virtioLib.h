@@ -49,6 +49,7 @@ extern "C" {
 
 #define IRQ_AFFINITY_MAX_SETS 4
 #define VIRTIO_DEV_ANY_ID 0xffffffff
+#define VIRTIO_NAME_LEN 16U
 #define VIRTIO_QUEUE_NAME_LEN 256
 
 #define VIRTIO_VSM_CFG_REGION 1

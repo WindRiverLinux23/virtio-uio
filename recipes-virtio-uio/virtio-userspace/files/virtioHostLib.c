@@ -122,6 +122,26 @@ struct pidNode {
 	TAILQ_ENTRY(pidNode) node;
 };
 
+/* VirtIO BE device driver process names */
+struct virtioBeProcName {
+	int id;
+	char name[16];
+};
+
+static struct virtioBeProcName procNames[] = {
+	{
+		VIRTIO_TYPE_NET, "virtio-net"
+	},
+	{
+		VIRTIO_TYPE_BLOCK, "virtio-block"
+	},
+	{
+		VIRTIO_TYPE_CONSOLE, "virtio-console"
+	}
+};
+
+int procNameSize = sizeof(procNames) / sizeof(struct virtioBeProcName);
+
 /* forward declarations */
 
 static int virtioHostReset(struct virtioHost *);
@@ -146,6 +166,21 @@ static VIRTIO_HOST_CFG_INFO virtioHostCfgInfo = {
 	.pMaps = NULL,
 	.mapNum = 0
 };
+
+/*
+ * Set the process name pased on the device type
+ * Used for debugging
+ */
+static int virtioHostSetProcName(int typeId)
+{
+	int j;
+	for (j = 0; j < procNameSize; j++) {
+		if (typeId == procNames[j].id) {
+			return pthread_setname_np(pthread_self(),
+						  procNames[j].name);
+		}
+	}
+}
 
 /*******************************************************************************
 *
@@ -546,6 +581,7 @@ static int virtioHostDevicesCreate(struct virtioHostDev *pHostDev,
 		if (pHostDrvInfo->flags == VIRTIO_HOST_FLAG_PROCESS) {
 			pid_t pid = fork();
 			if (pid == 0) {
+				virtioHostSetProcName(pHostDrvInfo->typeId);
 				ret = pagemap_reinit();
 				if (ret) {
 					log_err("pagemap reinitialization "
@@ -1901,9 +1937,13 @@ static int virtioHostSetStatus(struct virtioHost *vHost,
 *
 * ERRNO: N/A
 */
-inline bool virtioHostQueueReady(struct virtioHostQueue *pQueue)
+bool virtioHostQueueReady(struct virtioHostQueue *pQueue)
 {
 	uint32_t idx;
+
+	if (pQueue->vHost == NULL || pQueue->vHost->pQueue == NULL) {
+		return false;
+	}
 
 	idx = (uint32_t)(pQueue - pQueue->vHost->pQueue);
 
@@ -2502,9 +2542,9 @@ int virtioHostQueueIntrDisable(struct virtioHostQueue *pQueue)
 
 	vHost = pQueue->vHost;
 	if (!vHost) {
-		log_err("%s null vHost\n",
-				__FUNCTION__);
-		return -EACCES;
+		log_err("null vHost\n");
+		errno = EACCES;
+		return -1;
 	}
 
 	if (!virtioHostQueueReady(pQueue)) {
@@ -2594,7 +2634,7 @@ static void* virtioVsmReqHostHandle(void *arg)
 
 	if (!vHost) {
 		log_err("vHost is NULL\n");
-		return NULL;;
+		return NULL;
 	}
 	VIRTIO_HOST_DBG_MSG(VIRTIO_HOST_DBG_IRQREQ,
 			    "Starting thread for channel %d\n",

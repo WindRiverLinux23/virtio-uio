@@ -44,6 +44,7 @@ A program that tests VirtIO userspace subsystem
 #include "virtio_host_parser.h"
 #include "uio-virtio.h"
 #include "virtioHostLib.h"
+#include "virtioShowLib.h"
 
 /* local defines */
 
@@ -72,12 +73,42 @@ const char* uio_device = "/dev/uio0";
 /* This flag controls termination of the main loop. */
 volatile sig_atomic_t is_running;
 
+/* working copy of the virtio device */
+static struct virtio_device* workVdev = NULL;
+
 extern int virtioHostEventHandler(struct virtio_device* vdev);
 
 static void signal_handler(int signo)
 {
 	is_running = 0;
 }
+
+#ifdef DEBUG
+static void virtio_dump(int signo)
+{
+	printf("Working virtio device: %p\n", workVdev);
+	if (workVdev != NULL) {
+		printf("\nHost Queues:\n");
+		virtioHostDevShow();
+		printf("\nVSM Queues:\n");
+		virtioDevShow(workVdev, 0);
+	}
+}
+
+static int virtio_dump_init(struct virtio_device* vdev)
+{
+	struct sigaction sausr;
+	workVdev = vdev;
+	memset(&sausr, 0, sizeof(struct sigaction));
+	sausr.sa_handler = &virtio_dump;
+	if (sigaction(SIGUSR1, &sausr, NULL) != 0) {
+		log_err("SIGUSR1 setting error: %s\n", strerror(errno));
+		return -1;
+	}
+	return 0;
+}
+
+#endif /* DEBUG */
 
 static int virtioIntProcess(struct virtio_device* vdev, int uio_fd)
 {
@@ -123,8 +154,12 @@ static int virtioIntProcess(struct virtio_device* vdev, int uio_fd)
                 if (err == 0) {
                         continue;
                 } else if (err < 0) {
-                        log_err("Error\n");
-                        break;
+			log_err("Error %s\n", strerror(errno));
+			if (errno == EINTR) {
+				continue;
+			} else {
+				break;
+			}
                 } else {
                         if (uio.revents & POLLIN) {
 				err = read(uio_fd, &nints, sizeof(nints));
@@ -228,6 +263,9 @@ int main (void)
 		/*
 		 * Parent process. Handles VSM.
 		 */
+#ifdef DEBUG
+		virtio_dump_init(&virtioDevice);
+#endif
 		log_info("VirtIO VSM initialization complete\n");
 		uio_fd = open(virtioDevice.uio_device, O_RDWR | O_SYNC);
 		if (uio_fd < 0) {
@@ -239,6 +277,9 @@ int main (void)
 		vsm_deinit(&virtioDevice);
 	} else {
 		/* Process created for individual devices */
+#ifdef DEBUG
+		virtio_dump_init(&virtioDevice);
+#endif
 		log_info("VirtIO BE driver initialization complete\n");
 		while (1) {
 			sleep(60);
