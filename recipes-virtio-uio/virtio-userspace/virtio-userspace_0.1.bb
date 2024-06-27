@@ -99,4 +99,4 @@ do_install() {
 
 }
 
-COMPATIBLE_MACHINE = "(aptiv-cvc-fl|aptiv-cvc-131|euto-v9-discovery)"
+COMPATIBLE_MACHINE = "(aptiv-cvc-fl|aptiv-cvc-131|euto-v9-discovery|xilinx-zynqmp|nxp-s32g|nxp-imx8)"
