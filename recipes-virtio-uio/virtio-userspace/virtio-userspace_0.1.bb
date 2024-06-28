@@ -37,9 +37,10 @@ LIC_FILES_CHKSUM = " \
 inherit systemd
 SYSTEMD_SERVICE:${PN} = "virtio-userspace.service"
 
-DEPENDS += "libyaml linux-libc-headers openssl virtio-uio"
+DEPENDS += "libyaml linux-libc-headers openssl virtio-uio libgpiod"
 DEPENDS:append:euto-v9-discovery = " \
     libsdl2 sgpu-userspace pixman virglrenderer wayland"
+RDEPENDS:${PN} += "libgpiod"
 
 PR = "r0"
 PV = "0.1"
@@ -56,6 +57,7 @@ SRC_URI = "file://Makefile \
            file://virtioHostBlock.c \
            file://virtioHostNet.c \
            file://virtioHostConsole.c \
+           file://virtioHostGpio.c \
            file://mevent.c \
            file://mevent.h \
            file://virtio-userspace.service \

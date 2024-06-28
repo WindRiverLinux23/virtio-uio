@@ -22,7 +22,6 @@
 
 # UIO driver test Makefile
 
-
 SRCS = \
     virtioUioTest.c \
     virtio_host_yaml_parser.c \
@@ -32,8 +31,9 @@ SRCS = \
     virtioHostBlock.c \
     virtioHostNet.c \
     mevent.c \
-    virtioHostConsole.c
-LDFLAGS += -lyaml -lssl -lcrypto -lpthread
+    virtioHostConsole.c \
+    virtioHostGpio.c
+LDFLAGS += -lyaml -lssl -lcrypto -lpthread -lgpiod
 
 ifeq ($(CONFIG_INCLUDE_HOST_GPU),y)
 SRCS += \
