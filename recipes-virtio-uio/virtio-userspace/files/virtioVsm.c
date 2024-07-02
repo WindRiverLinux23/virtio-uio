@@ -1004,6 +1004,8 @@ extern void virtioHostGpuDrvInit(void);
 extern void virtioHostGpuDrvRelease(void);
 extern void virtioHostGpioDrvInit(void);
 extern void virtioHostGpioDrvRelease(void);
+extern void virtioVTSockBEDrvInit(void);
+extern void virtioVTSockBEDrvTerminate(void);
 
 /*
  * Get maximum number of channels from the VirtIO configuration space
@@ -1274,6 +1276,9 @@ int vsm_init(struct virtio_device *vdev)
 	/* Init host GPIO driver */
 	virtioHostGpioDrvInit();
 
+        /* Init host vSock driver */
+        virtioVTSockBEDrvInit();
+
 	/* Init host lib */
 	virtioHostDevicesInit();
 
@@ -1346,6 +1351,9 @@ void vsm_deinit(struct virtio_device *vdev)
 #endif
 	/* Release host GPIO driver */
 	virtioHostGpioDrvRelease();
+
+        /* Release host vSock driver */
+        virtioVTSockBEDrvTerminate();
 
 	pDrvCtrl = vdev->priv;
 	if (!pDrvCtrl) {

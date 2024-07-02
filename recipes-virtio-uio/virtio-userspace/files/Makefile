@@ -32,7 +32,10 @@ SRCS = \
     virtioHostNet.c \
     mevent.c \
     virtioHostConsole.c \
-    virtioHostGpio.c
+    virtioHostGpio.c \
+    virtioHostVSock.c \
+    virtioHostVSock_unix.c
+
 LDFLAGS += -lyaml -lssl -lcrypto -lpthread -lgpiod
 
 ifeq ($(CONFIG_INCLUDE_HOST_GPU),y)
