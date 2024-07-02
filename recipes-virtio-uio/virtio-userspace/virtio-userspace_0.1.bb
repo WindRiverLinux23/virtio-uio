@@ -1,5 +1,5 @@
 DESCRIPTION      = "UGOS VirtIO userspace driver for HV 3.0"
-LICENSE          = "BSD & BSD-3-Clause & FreeBSD & MIT"
+LICENSE          = "BSD-3-Clause & MIT"
 SECTION          = "network"
 LIC_FILES_CHKSUM = " \
     file://gpu/atomic.h;beginline=1;endline=5;md5=bca6549c36843804782ba1ad3817837c \
