@@ -49,6 +49,7 @@
 #include <semaphore.h>
 #include <termios.h>
 #include <limits.h>
+#include <syslog.h>
 #include <linux/virtio_console.h>
 #include "mevent.h"
 #include "virtioHostLib.h"
@@ -58,7 +59,7 @@
 		(type *)( (char *)__mptr - offsetof(type,member) );})
 
 #undef VIRTIO_CONSOLE_DEV_DUMP_PACKETS
-#define VIRTIO_CONSOLE_DEV_DBG_ON
+#undef VIRTIO_CONSOLE_DEV_DBG_ON
 #ifdef VIRTIO_CONSOLE_DEV_DBG_ON
 
 #define VIRTIO_CONSOLE_DEV_DBG_OFF             0x00000000
@@ -80,8 +81,15 @@ static uint32_t virtioConsoleDevDbgMask =  VIRTIO_CONSOLE_DEV_DBG_ERR;
 		}							\
 	}								\
 while ((false))
+#define log_err(fmt, ...)                                       \
+        VIRTIO_CONSOLE_DEV_DBG(VIRTIO_CONSOLE_DEV_DBG_ERR, fmt,	\
+			       ##__VA_ARGS__)
 #else
 #define VIRTIO_CONSOLE_DEV_DBG(...)
+#define VIRTIO_NET_DEV_DBG(...)
+#define log_err(fmt, ...)                                       \
+        syslog(LOG_ERR, "%d: %s() " fmt, __LINE__, __func__,    \
+               ##__VA_ARGS__)
 #endif
 
 #define VIRTIO_CONSOLE_DRV_NAME         "virtio-console-host"
@@ -174,21 +182,10 @@ struct virtioConsoleHostDev {
 	bool ready;
 };
 
-struct virtioDispObj {
-	TAILQ_ENTRY(virtioDispObj) link;
-	struct virtioHostQueue *pQueue;
-};
-
 static struct virtioConsoleHostDrv {
 	struct virtioConsoleHostDev *vConsoleHostDevList[VIRTIO_CONSOLE_HOST_DEV_MAX];
 	uint32_t vConsoleHostDevNum;
 	pthread_mutex_t drvMtx;
-	TAILQ_HEAD(, virtioDispObj) dispFreeQ;
-	TAILQ_HEAD(, virtioDispObj) dispBusyQ;
-	pthread_t dispThread;
-	pthread_mutex_t dispMtx;
-	pthread_cond_t dispCond;
-	struct virtioDispObj dispObj[VIRTIO_CONSOLE_DISP_OBJ_MAX];
 } vConsoleHostDrv;
 
 static int virtioHostConsoleReset(struct virtioHost *);
@@ -204,12 +201,12 @@ static void virtioConsoleBackendRead(int fd __attribute__((unused)),
 			    enum ev_type t __attribute__((unused)),
 			    void *arg);
 static void virtioConsoleRestoreStdio(void);
-static void* virtioHostConsoleReqDispatch(void *);
 static void virtioHostConsoleReqHandleRx(struct virtioConsolePort *pConsolePort);
 static void* virtioHostConsoleReqHandleTx(void *arg);
 static void* virtioHostConsoleReqHandleControlTx(void *arg);
 static int virtioHostConsoleSetStatus(struct virtioHost* vHost,
 				      uint32_t status);
+static int virtioHostConsoleReqDispatch(struct virtioHostQueue *pQueue);
 
 struct virtioHostOps virtioConsoleHostOps = {
 	.reset    = virtioHostConsoleReset,
@@ -231,10 +228,33 @@ bool stdio_in_use = false;
 static struct termios virtio_console_saved_tio;
 static int virtio_console_saved_flags;
 
+/* mevent initialization synchronization primitives semaphore */
+static bool mevent_initialized = false;
+static pthread_mutex_t mevent_init_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t mevent_init_cond = PTHREAD_COND_INITIALIZER;
+
+static void virtioHostMeventInitWait(void)
+{
+	pthread_mutex_lock(&mevent_init_mutex);
+	while(mevent_initialized == false) {
+		pthread_cond_wait(&mevent_init_cond, &mevent_init_mutex);
+	}
+	pthread_mutex_unlock(&mevent_init_mutex);
+}
+
+static void virtioHostMeventInitDone(void)
+{
+	pthread_mutex_lock(&mevent_init_mutex);
+	mevent_initialized = true;
+	pthread_cond_signal(&mevent_init_cond);
+	pthread_mutex_unlock(&mevent_init_mutex);
+}
+
 pthread_t virtioHostMeventDispatchThread;
 void* virtioHostMeventDispatch(void *my_unused)
 {
 	mevent_init();
+	virtioHostMeventInitDone();
 	mevent_dispatch();
 }
 
@@ -255,26 +275,13 @@ void virtioHostConsoleDrvInit(void)
 	virtioHostDrvRegister((struct virtioHostDrvInfo *)&HostDrvInfo);
 
 	pthread_mutex_init(&vConsoleHostDrv.drvMtx, NULL);
-
-	TAILQ_INIT(&vConsoleHostDrv.dispFreeQ);
-	TAILQ_INIT(&vConsoleHostDrv.dispBusyQ);
-	for (i = 0; i < VIRTIO_CONSOLE_DISP_OBJ_MAX; i++) {
-		TAILQ_INSERT_HEAD(&vConsoleHostDrv.dispFreeQ, &vConsoleHostDrv.dispObj[i], link);
-	}
-	pthread_mutex_init(&vConsoleHostDrv.dispMtx, NULL);
-	pthread_cond_init(&vConsoleHostDrv.dispCond, NULL);
-
-	ret = pthread_create(&vConsoleHostDrv.dispThread, NULL, virtioHostConsoleReqDispatch, NULL);
-	if (ret) {
-		VIRTIO_CONSOLE_DEV_DBG(VIRTIO_CONSOLE_DEV_DBG_ERR,
-				"failed to create virtio console host dispatch thread\n");
-	}
-
-	ret = pthread_create(&virtioHostMeventDispatchThread, NULL,
-			virtioHostMeventDispatch, NULL);
-	if (ret) {
-		VIRTIO_CONSOLE_DEV_DBG(VIRTIO_CONSOLE_DEV_DBG_ERR,
-				"failed to create mevent dispatch thread(%d)\n", ret);
+	if (HostDrvInfo.flags == VIRTIO_HOST_FLAG_THREAD) {
+		ret = pthread_create(&virtioHostMeventDispatchThread, NULL,
+				     virtioHostMeventDispatch, NULL);
+		if (ret) {
+			log_err("failed to create mevent dispatch "
+				"thread: %s (%d)\n", strerror(errno), ret);
+		}
 	}
 }
 
@@ -690,6 +697,18 @@ static int virtioHostConsoleBeDevCreate(struct virtioConsoleHostDev *pConsoleHos
 	struct virtioConsoleBackend *be;
 	int fd = -1, ret;
 
+	if (HostDrvInfo.flags == VIRTIO_HOST_FLAG_PROCESS) {
+		ret = pthread_create(&virtioHostMeventDispatchThread, NULL,
+				     virtioHostMeventDispatch, NULL);
+		if (ret) {
+			log_err("failed to create mevent "
+				"dispatch thread: %s (%d)\n",
+				strerror(errno), ret);
+			goto err;
+		}
+	}
+
+	virtioHostMeventInitWait();
 	pConsoleHostCtx = &pConsoleHostDev->consoleHostCtx;
 	pConsoleBePortArgs = &pConsoleHostDev->beDevArgs.ports[portId];
 
@@ -736,7 +755,8 @@ static int virtioHostConsoleBeDevCreate(struct virtioConsoleHostDev *pConsoleHos
 					virtioConsoleTeardownBackend, be);
 			if (be->evp == NULL) {
 				VIRTIO_CONSOLE_DEV_DBG(VIRTIO_CONSOLE_DEV_DBG_ERR,
-						"mevent_add failed\n");
+						       "mevent_add failed: %s\n",
+						       strerror(errno));
 				goto err;
 			}
 			pConsoleHostDev->refCount++;
@@ -747,7 +767,8 @@ static int virtioHostConsoleBeDevCreate(struct virtioConsoleHostDev *pConsoleHos
 					virtioConsoleTeardownBackend, be);
 			if (be->evp == NULL) {
 				VIRTIO_CONSOLE_DEV_DBG(VIRTIO_CONSOLE_DEV_DBG_ERR,
-						"mevent_add failed\n");
+						       "mevent_add failed: %s\n",
+						       strerror(errno));
 				goto err;
 			}
 			pConsoleHostDev->refCount++;
@@ -1183,84 +1204,6 @@ static void virtioHostConsoleAbort(struct virtioHostQueue *pQueue, uint16_t idx)
 
 /*******************************************************************************
  *
- * virtioHostConsoleReqDispatch - virtio net device dispatch task
- *
- * This routine is used to dispatch virtio net device IO or control requests
- * to specific handling thread(s).
- *
- * RETURNS: 0, or -1 if the recieved operation request with a invalid format or
- * error meeting a failure in process of filesystem operation.
- *
- * ERRNO: N/A
- */
-
-static void* virtioHostConsoleReqDispatch(void *my_unused)
-{
-	struct virtioConsoleHostCtx *pConsoleHostCtx;
-	struct virtioDispObj *pDispObj;
-	uint32_t queueId, portId;
-	int ret;
-
-	pthread_mutex_lock(&vConsoleHostDrv.dispMtx);
-
-	while (1) {
-		while (1) {
-			if (TAILQ_EMPTY(&vConsoleHostDrv.dispBusyQ))
-				break;
-
-			pDispObj = TAILQ_FIRST(&vConsoleHostDrv.dispBusyQ);
-			if (pDispObj) {
-				TAILQ_REMOVE(&vConsoleHostDrv.dispBusyQ, pDispObj, link);
-			} else {
-				VIRTIO_CONSOLE_DEV_DBG(VIRTIO_CONSOLE_DEV_DBG_ERR,
-						"failed to get dispatch object from busy queue\n");
-			}
-
-			pthread_mutex_unlock(&vConsoleHostDrv.dispMtx);
-
-			if (pDispObj && pDispObj->pQueue && pDispObj->pQueue->vHost) {
-				pConsoleHostCtx = (struct virtioConsoleHostCtx *)pDispObj->pQueue->vHost;
-				queueId = pDispObj->pQueue - pDispObj->pQueue->vHost->pQueue;
-				portId = queueId / 2 == 0 ? 0 : (queueId / 2) - 1;
-
-				if (queueId / 2 != 1) { /* IO queue ID: 0,1,4,5... */
-					if (queueId % 2 == 0) {
-						if (!pConsoleHostCtx->ports[portId].rx_ready)
-							pConsoleHostCtx->ports[portId].rx_ready = 1;
-					} else {
-						ret = sem_post(&pConsoleHostCtx->ports[portId].tx_sem);
-						if (ret)
-							VIRTIO_CONSOLE_DEV_DBG(VIRTIO_CONSOLE_DEV_DBG_ERR,
-									"failed to sem_post tx_sem: %s\n",
-									strerror(errno));
-					}
-				} else { /* control queue ID: 2,3 */
-					ret = sem_post(&pConsoleHostCtx->controlPort.tx_sem);
-					if (ret)
-						VIRTIO_CONSOLE_DEV_DBG(VIRTIO_CONSOLE_DEV_DBG_ERR,
-								"failed to sem_post tx_sem: %s\n",
-								strerror(errno));
-				}
-			} else {
-				VIRTIO_CONSOLE_DEV_DBG(VIRTIO_CONSOLE_DEV_DBG_ERR,
-						"failed to get virtqueue from busy object\n");
-			}
-
-			pthread_mutex_lock(&vConsoleHostDrv.dispMtx);
-
-			TAILQ_INSERT_TAIL(&vConsoleHostDrv.dispFreeQ, pDispObj, link);
-		}
-
-		pthread_cond_wait(&vConsoleHostDrv.dispCond, &vConsoleHostDrv.dispMtx);
-	}
-
-	pthread_mutex_unlock(&vConsoleHostDrv.dispMtx);
-
-	return NULL;
-}
-
-/*******************************************************************************
- *
  * virtioHostConsoleReqHandleRx - virtio console device request rx handle task
  *
  * This routine is used to create a handler task for virtio console device
@@ -1675,6 +1618,62 @@ static void* virtioHostConsoleReqHandleControlTx(void *arg)
 
 /*******************************************************************************
  *
+ * virtioHostConsoleReqDispatch - notify a device of a new arrived io-request
+ *
+ * This routine is used to notify the individual device that an new
+ * recieved io-request in virtio queue.
+ *
+ * RETURNS: 0 on success and -1 on error
+ */
+
+static int virtioHostConsoleReqDispatch(struct virtioHostQueue *pQueue)
+{
+	struct virtioConsoleHostCtx* pConsoleHostCtx;
+	int ret = 0;
+	uint32_t queueId, portId;
+
+	if (pQueue->vHost == NULL) {
+		log_err("vHost is NULL\n");
+		errno = EINVAL;
+		return -1;
+	}
+
+	virtioHostQueueIntrDisable(pQueue);
+	pConsoleHostCtx = (struct virtioConsoleHostCtx *)pQueue->vHost;
+	queueId = pQueue - pQueue->vHost->pQueue;
+	portId = queueId / 2 == 0 ? 0 : (queueId / 2) - 1;
+
+	if (queueId / 2 != 1) { /* IO queue ID: 0,1,4,5... */
+		if (queueId % 2 == 0) {
+			if (!pConsoleHostCtx->ports[portId].rx_ready)
+				pConsoleHostCtx->ports[portId].rx_ready = 1;
+		} else {
+			ret = sem_post(&pConsoleHostCtx->ports[portId].tx_sem);
+			if (ret) {
+				log_err("failed to sem_post tx_sem: %s\n",
+					strerror(errno));
+				ret = -1;
+				goto out;
+			}
+		}
+	} else { /* control queue ID: 2,3 */
+		ret = sem_post(&pConsoleHostCtx->controlPort.tx_sem);
+		if (ret) {
+			log_err("failed to sem_post tx_sem: %s\n",
+				strerror(errno));
+			ret = -1;
+			goto out;
+		}
+	}
+out:
+	if (ret != 0) {
+		virtioHostQueueIntrEnable(pQueue);
+	}
+	return ret;
+}
+
+/*******************************************************************************
+ *
  * virtioHostConsoleNotify - notify here comes a new IO/control request
  *
  * This routine is used to notify the handler that an new recieved io-request
@@ -1690,32 +1689,13 @@ static void virtioHostConsoleNotify(struct virtioHostQueue *pQueue)
 	struct virtioDispObj *pDispObj;
 
 	if (!pQueue) {
-		VIRTIO_CONSOLE_DEV_DBG(VIRTIO_CONSOLE_DEV_DBG_ERR, "null pQueue\n");
+		log_err("null pQueue\n");
 		return;
 	}
 
-	if (pQueue->vHost && (pQueue->vHost->status & VIRTIO_CONFIG_S_DRIVER_OK) != 0) {
-		pthread_mutex_lock(&vConsoleHostDrv.dispMtx);
-		if (!TAILQ_EMPTY(&vConsoleHostDrv.dispFreeQ)) {
-
-			pDispObj = TAILQ_FIRST(&vConsoleHostDrv.dispFreeQ);
-			if (!pDispObj) {
-				VIRTIO_CONSOLE_DEV_DBG(VIRTIO_CONSOLE_DEV_DBG_ERR,
-						"failed to get dispatch object from free queue\n");
-				pthread_mutex_unlock(&vConsoleHostDrv.dispMtx);
-				return;
-			}
-			virtioHostQueueIntrDisable(pQueue);
-			TAILQ_REMOVE(&vConsoleHostDrv.dispFreeQ, pDispObj, link);
-			pDispObj->pQueue = pQueue;
-			TAILQ_INSERT_TAIL(&vConsoleHostDrv.dispBusyQ, pDispObj, link);
-
-			pthread_cond_signal(&vConsoleHostDrv.dispCond);
-		} else {
-			VIRTIO_CONSOLE_DEV_DBG(VIRTIO_CONSOLE_DEV_DBG_ERR,
-					"No object in dispatch free queue\n");
-		}
-		pthread_mutex_unlock(&vConsoleHostDrv.dispMtx);
+	if (pQueue->vHost &&
+	    (pQueue->vHost->status & VIRTIO_CONFIG_S_DRIVER_OK) != 0) {
+		virtioHostConsoleReqDispatch(pQueue);
 	}
 
 	return;
