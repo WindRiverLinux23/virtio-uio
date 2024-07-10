@@ -171,28 +171,18 @@ struct virtioNetHostDev {
 	struct epoll_event ee;
 };
 
-struct virtioDispObj {
-	TAILQ_ENTRY(virtioDispObj) link;
-	struct virtioHostQueue *pQueue;
-};
-
 static struct virtioNetHostDrv {
 	struct virtioNetHostDev * vNetHostDevList[VIRTIO_NET_HOST_DEV_MAX];
 	uint32_t vNetHostDevNum;
 	pthread_mutex_t drvMtx;
-	TAILQ_HEAD(, virtioDispObj) dispFreeQ;
-	TAILQ_HEAD(, virtioDispObj) dispBusyQ;
-	pthread_t dispThread;
-	pthread_mutex_t dispMtx;
-	pthread_cond_t dispCond;
-	struct virtioDispObj dispObj[VIRTIO_NET_DISP_OBJ_MAX];
 } vNetHostDrv;
 
 static int virtioHostNetReset(struct virtioHost *);
+static int virtioHostNetReqDispatch(struct virtioHostQueue *pQueue);
 static void virtioHostNetNotify(struct virtioHostQueue *);
-static int virtioHostNetCfgRead(struct virtioHost *, uint64_t, uint64_t size, uint32_t *);
+static int virtioHostNetCfgRead(struct virtioHost *, uint64_t, uint64_t size,
+				uint32_t *);
 static int virtioHostNetCfgWrite(struct virtioHost *, uint64_t, uint64_t, uint32_t);
-static void* virtioHostNetReqDispatch(void *);
 static void* virtioHostNetTxHandle(void *pNetHostCtx);
 static void* virtioHostNetRxHandle(void *pNetHostCtx);
 static int virtioHostNetCreate(struct virtioHostDev *);
@@ -228,37 +218,8 @@ static struct virtioHostDrvInfo virtioNetHostDrvInfo =
 
 void virtioHostNetDrvInit(void)
 {
-	int ret, i;
-
 	virtioHostDrvRegister((struct virtioHostDrvInfo *)&virtioNetHostDrvInfo);
-
 	pthread_mutex_init(&vNetHostDrv.drvMtx, NULL);
-
-	TAILQ_INIT(&vNetHostDrv.dispFreeQ);
-	TAILQ_INIT(&vNetHostDrv.dispBusyQ);
-	for (i = 0; i < VIRTIO_NET_DISP_OBJ_MAX; i++) {
-		TAILQ_INSERT_HEAD(&vNetHostDrv.dispFreeQ,
-				  &vNetHostDrv.dispObj[i], link);
-	}
-	pthread_mutex_init(&vNetHostDrv.dispMtx, NULL);
-	pthread_cond_init(&vNetHostDrv.dispCond, NULL);
-
-
-	/*
-	 * The request dispatch thread has to be one for all the devices
-	 * For the testing purposes we run only one network device
-	 * For the future we need to modify individual BE drivers to
-	 * work as multiple processes
-	 */
-	if (virtioNetHostDrvInfo.flags == VIRTIO_HOST_FLAG_THREAD) {
-		ret = pthread_create(&vNetHostDrv.dispThread, NULL,
-				     virtioHostNetReqDispatch, NULL);
-		if (ret) {
-			log_err("failed to create virtio net host "
-				"dispatch thread\n");
-		}
-	}
-
 }
 
 void virtioHostNetDrvRelease(void)
@@ -670,22 +631,6 @@ static int virtioHostNetDevCreate(struct virtioNetHostDev *pNetHostDev)
 	pNetHostCtx   = (struct virtioNetHostCtx *)pNetHostDev;
 	pNetBeDevArgs = &pNetHostDev->beDevArgs;
 
-	/*
-	 * The request dispatch thread has to be one for all the devices
-	 * For the testing purposes we run only one network device
-	 * For the future we need to modify individual BE drivers to
-	 * work as multiple processes
-	 */
-	if (virtioNetHostDrvInfo.flags == VIRTIO_HOST_FLAG_PROCESS) {
-		ret = pthread_create(&vNetHostDrv.dispThread, NULL,
-				     virtioHostNetReqDispatch, NULL);
-		if (ret) {
-			log_err("failed to create virtio net host "
-				"dispatch thread\n");
-			goto err;
-		}
-	}
-
 	ret = virtioHostNetBeDevCreate(pNetHostDev);
 	if (ret)
 		goto err;
@@ -708,7 +653,8 @@ static int virtioHostNetDevCreate(struct virtioNetHostDev *pNetHostDev)
 	}
 
 	pthread_mutex_lock(&vNetHostDrv.drvMtx);
-	vNetHostDrv.vNetHostDevList[vNetHostDrv.vNetHostDevNum] = pNetHostDev;
+	vNetHostDrv.vNetHostDevList[vNetHostDrv.vNetHostDevNum] =
+		pNetHostDev;
 	devNum = vNetHostDrv.vNetHostDevNum++;
 	pthread_mutex_unlock(&vNetHostDrv.drvMtx);
 
@@ -951,82 +897,6 @@ static void virtioHostNetAbort(struct virtioHostQueue *pQueue, uint16_t idx)
 	}
 
 	return;
-}
-
-/*******************************************************************************
- *
- * virtioHostNetReqDispatch - virtio net device dispatch task
- *
- * This routine is used to dispatch virtio net device IO requests to specific
- * handling thread(s).
- *
- * RETURNS: 0, or -1 if the recieved operation request with a invalid format or
- * error meeting a failure in process of filesystem operation.
- *
- * ERRNO: N/A
- */
-
-static void* virtioHostNetReqDispatch(void *my_unused)
-{
-	struct virtioNetHostCtx *pNetHostCtx;
-	struct virtioDispObj *pDispObj;
-	int ret;
-
-	pthread_mutex_lock(&vNetHostDrv.dispMtx);
-
-	while (1) {
-		while (1) {
-			if (TAILQ_EMPTY(&vNetHostDrv.dispBusyQ))
-				break;
-
-			pDispObj = TAILQ_FIRST(&vNetHostDrv.dispBusyQ);
-			if (pDispObj) {
-				TAILQ_REMOVE(&vNetHostDrv.dispBusyQ, pDispObj, link);
-			} else {
-				log_err("failed to get dispatch object "
-					"from busy queue\n");
-			}
-
-			pthread_mutex_unlock(&vNetHostDrv.dispMtx);
-
-			if (pDispObj && pDispObj->pQueue &&
-			    pDispObj->pQueue->vHost) {
-				pNetHostCtx =
-					(struct virtioNetHostCtx *)
-					pDispObj->pQueue->vHost;
-				if (pDispObj->pQueue ==
-				    &pDispObj->pQueue->vHost->pQueue[VIRTIO_NET_TXQ]) {
-					ret = sem_post(&pNetHostCtx->tx_sem);
-					if (ret) {
-						log_err("failed to sem_post "
-							"tx_sem: %s\n",
-							strerror(errno));
-					}
-				}
-				if (pDispObj->pQueue ==
-				    &pDispObj->pQueue->vHost->pQueue[VIRTIO_NET_RXQ]) {
-					ret = sem_post(&pNetHostCtx->rx_sem);
-					if (ret) {
-						log_err("failed to sem_post "
-							"tx_sem: %s\n",
-							strerror(errno));
-					}
-				}
-			} else {
-				log_err("failed to get virtqueue from busy object\n");
-			}
-
-			pthread_mutex_lock(&vNetHostDrv.dispMtx);
-
-			TAILQ_INSERT_TAIL(&vNetHostDrv.dispFreeQ, pDispObj, link);
-		}
-
-		pthread_cond_wait(&vNetHostDrv.dispCond, &vNetHostDrv.dispMtx);
-	}
-
-	pthread_mutex_unlock(&vNetHostDrv.dispMtx);
-
-	return NULL;
 }
 
 /*******************************************************************************
@@ -1560,6 +1430,58 @@ static void* virtioHostNetRxHandle(void *pNetHostCtx)
 
 /*******************************************************************************
  *
+ * virtioHostNetReqDispatch - notify a device of a new arrived io-request
+ *
+ * This routine is used to notify the individual device that an new
+ * recieved io-request in virtio queue.
+ *
+ * RETURNS: 0 on success and -1 on error
+ */
+
+static int virtioHostNetReqDispatch(struct virtioHostQueue *pQueue)
+{
+	struct virtioNetHostCtx *pNetHostCtx;
+	int ret;
+
+	if (pQueue->vHost == NULL) {
+		log_err("vHost is NULL\n");
+		errno = EINVAL;
+		return -1;
+	}
+
+	/* Disable kick from FE driver during handling requests */
+	virtioHostQueueIntrDisable(pQueue);
+
+	pNetHostCtx = (struct virtioNetHostCtx *)pQueue->vHost;
+	if (pQueue == &pQueue->vHost->pQueue[VIRTIO_NET_TXQ]) {
+		ret = sem_post(&pNetHostCtx->tx_sem);
+		if (ret) {
+			log_err("failed to sem_post tx_sem: %s\n",
+				strerror(errno));
+			goto end;
+		}
+	} else if (pQueue == &pQueue->vHost->pQueue[VIRTIO_NET_RXQ]) {
+		ret = sem_post(&pNetHostCtx->rx_sem);
+		if (ret) {
+			log_err("failed to sem_post tx_sem: %s\n",
+				strerror(errno));
+			goto end;
+		}
+	} else {
+		log_err("Incorrect queue for vHost\n");
+		errno = EINVAL;
+		goto end;
+	}
+end:
+	if (ret != 0) {
+		virtioHostQueueIntrEnable(pQueue);
+	}
+	return ret;
+}
+
+
+/*******************************************************************************
+ *
  * virtioHostNetNotify - notify of a new arrived io-request
  *
  * This routine is used to notify the handler that an new recieved io-request
@@ -1585,28 +1507,7 @@ static void virtioHostNetNotify(struct virtioHostQueue *pQueue)
 
 	if (pQueue->vHost && (pQueue->vHost->status &
 			      VIRTIO_CONFIG_S_DRIVER_OK) != 0) {
-		pthread_mutex_lock(&vNetHostDrv.dispMtx);
-		if (!TAILQ_EMPTY(&vNetHostDrv.dispFreeQ)) {
-			pDispObj = TAILQ_FIRST(&vNetHostDrv.dispFreeQ);
-			if (!pDispObj) {
-				log_err("failed to get dispatch object from "
-					"free queue\n");
-				pthread_mutex_unlock(&vNetHostDrv.dispMtx);
-				return;
-			}
-
-			/* Disable kick from FE driver during handling requests */
-			virtioHostQueueIntrDisable(pQueue);
-
-			TAILQ_REMOVE(&vNetHostDrv.dispFreeQ, pDispObj, link);
-			pDispObj->pQueue = pQueue;
-			TAILQ_INSERT_TAIL(&vNetHostDrv.dispBusyQ, pDispObj, link);
-
-			pthread_cond_signal(&vNetHostDrv.dispCond);
-		} else {
-			log_err("No object in dispatch free queue\n");
-		}
-		pthread_mutex_unlock(&vNetHostDrv.dispMtx);
+		virtioHostNetReqDispatch(pQueue);
 	}
 
 	return;
