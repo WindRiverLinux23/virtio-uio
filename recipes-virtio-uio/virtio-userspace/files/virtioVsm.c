@@ -491,6 +491,9 @@ static void virtioVsmQueueDone(struct virtqueue *pQueue)
 		return;
 	}
 
+	if (virtioPeekBuffer(pQueue) == false) {
+		return;
+	}
 	pDrvCtrl = pQueue->vdev->priv;
 	if (!pDrvCtrl) {
 		log_err("null pDrvCtrl\n");

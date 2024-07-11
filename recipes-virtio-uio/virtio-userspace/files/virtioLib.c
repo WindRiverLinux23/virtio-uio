@@ -1106,6 +1106,30 @@ void virtio_add_status(struct virtio_device* vdev, uint8_t status)
 	}
 }
 
+/**
+ * virtioPeekBuffer - check if the virtio queue has buffers
+ *
+ * This routine checks if the virtio queue has buffers, but does
+ * not try to retrieve them.
+ *
+ * RETURNS: true if one or more buffer available and false otherwise
+ */
+bool virtioPeekBuffer(struct virtqueue* pQueue)
+{
+	if (pQueue == NULL) {
+		log_err("null queue pointer\n");
+		return false;
+        }
+
+	virtio_mb();
+	if (pQueue->usedIdx == virtio16_to_cpu(pQueue->vdev,
+					       pQueue->vRing.used->idx)) {
+		return false;
+	} else {
+		return true;
+	}
+}
+
 void* virtqueueGetBuffer(struct virtqueue* pQueue,
 			 unsigned int *pLen,
 			 uint32_t* pToken)
@@ -1122,9 +1146,7 @@ void* virtqueueGetBuffer(struct virtqueue* pQueue,
 	VIRTIO_LIB_DBG_MSG(VIRTIO_LIB_DBG_QUEUE,
 			   "start\n");
 
-	virtio_mb();
-	if (pQueue->usedIdx == virtio16_to_cpu(pQueue->vdev,
-					       pQueue->vRing.used->idx)) {
+	if (virtioPeekBuffer(pQueue) == false) {
 		return NULL;
 	}
 
